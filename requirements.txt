@@ -1,0 +1,9 @@
+pymupdf==1.28.2
+pydantic==2.14.2
+google-genai==2.34.0
+python-dotenv==1.2.4
+reportlab==4.5.1
+pytest==9.2.0
+supabase==2.34.0
+
+streamlit==1.66.1

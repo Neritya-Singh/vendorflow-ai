@@ -1,0 +1,29 @@
+.env
+.streamlit/secrets.toml
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+*.log
+
+# >>> VendorFlow AI Stage 3.6.1 safety rules >>>
+# Keep local secrets and copies out of public Git repositories.
+.env.*
+!.env.example
+.streamlit/secrets*.toml
+*.zip
+*.7z
+*.tar
+*.tar.gz
+*.bak
+*.backup
+*.pem
+*.p12
+*.pfx
+# <<< VendorFlow AI Stage 3.6.1 safety rules <<<
+
+# Local Streamlit development-assistant links
+.agents/skills/developing-with-streamlit
+.claude/skills/developing-with-streamlit

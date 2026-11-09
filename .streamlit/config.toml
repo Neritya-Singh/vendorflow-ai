@@ -1,0 +1,22 @@
+
+[server]
+maxUploadSize = 5
+
+[theme]
+base = "light"
+primaryColor = "#602C2D"
+backgroundColor = "#EDEBEC"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#211A1C"
+borderColor = "#E4DFE1"
+dataframeBorderColor = "#D8D0D3"
+dataframeHeaderBackgroundColor = "#F4F0F2"
+dataframeHeaderTextColor = "#392F32"
+baseRadius = "0.75rem"
+buttonRadius = "0.65rem"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+headingFont = "Manrope:https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap"
+showWidgetBorder = true
+
+[client]
+toolbarMode = "viewer"

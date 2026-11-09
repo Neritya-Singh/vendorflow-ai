@@ -1,0 +1,11 @@
+{
+  "legal_name": "Acme Widgets Private Limited",
+  "business_state": "Uttar Pradesh",
+  "contact_name": "Demo Contact",
+  "contact_email": "demo@example.com",
+  "gstin": "09ABCDE1234F1Z5",
+  "pan": "ABCDE1234F",
+  "bank_holder": "Acme Widgets Private Limited",
+  "account_number": "001234567890",
+  "ifsc": "DEMO0123456"
+}
