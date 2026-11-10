@@ -23,6 +23,10 @@ from vendorflow.admin_login_guard import (
     clear_admin_login_failures, remaining_admin_lockout, record_admin_login_failure,
 )
 from vendorflow.rules import GST_STATE_CODES
+from vendorflow.ux_support import (
+    VENDOR_NAV, active_review_request, admin_queue_rows, committed_pdf_types,
+    next_action_owner, valid_contact_email, vendor_next_step,
+)
 from vendorflow.ui_support import (
     comparison_assessments, comparison_rows, completed_counts, display_status, mask_sensitive,
     selected_reasons, stage_rows, vendor_visible_checks,
@@ -317,6 +321,17 @@ body:has(.vf-admin-view-marker) [data-testid="stSidebar"] [data-testid="stWidget
 .vf-evidence-disclaimer {font-size:.81rem;color:#5F5558;margin:.1rem 0 .9rem;}
 @media(max-width:800px) {.vf-evidence-table th,.vf-evidence-table td {padding:.68rem .62rem;}}
 
+/* Stage 6.3: clear landing choices and compact, responsive worklists. */
+.vf-welcome {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin:.65rem 0 1.2rem;}
+.vf-welcome-panel {background:#fff;border:1px solid #E4DFE1;border-radius:14px;
+    padding:1.05rem 1.2rem;min-height:124px;}
+.vf-welcome-panel h3 {font:750 1.05rem 'Manrope',sans-serif;color:#211A1C;margin:0 0 .45rem;}
+.vf-welcome-panel p {font:.88rem/1.5 'Inter',sans-serif;color:#554B4E;margin:0;}
+.vf-work-owner {padding:.75rem 1rem;border:1px solid #E4DFE1;border-radius:11px;
+    background:#fff;margin:.5rem 0 1rem;}
+.vf-work-owner strong {color:#602C2D;}
+@media (max-width:760px){.vf-welcome{grid-template-columns:1fr;}
+ .vf-welcome-panel{min-height:auto;}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -436,6 +451,16 @@ def check_results(run: dict) -> None:
         st.dataframe(rows, hide_index=True, width="stretch")
 
 
+def staff_check_results(run: dict) -> None:
+    """Reviewer-only detail, including R12; never reuse this in the vendor portal."""
+    with st.expander("All reviewer checks and rule evidence"):
+        rows = [{"Rule": c.get("rule_id"), "Check": c.get("label"),
+                 "Outcome": c.get("state"),
+                 "Evidence": c.get("admin_detail") or c.get("vendor_message") or "Requires review"}
+                for c in run.get("checks_json") or []]
+        st.dataframe(rows, hide_index=True, width="stretch")
+
+
 def admin_evidence_table(claimed: dict, extracted: dict, checks: list[dict]) -> None:
     """Highlight documentary differences; never show unmasked sensitive IDs."""
     rows = comparison_assessments(claimed, extracted, checks)
@@ -552,17 +577,22 @@ def review_form_warnings(values: dict) -> list[str]:
 
 
 def new_application() -> None:
-    st.subheader("Start a new application")
-    st.markdown('<p class="vf-section-subtitle">Three clear steps for GST-registered Indian businesses. Use synthetic sample details only.</p>',
-                unsafe_allow_html=True)
     if st.session_state.get("receipt"):
         receipt = st.session_state.receipt
-        st.subheader("Application check complete")
+        st.subheader("Application result and receipt")
         result_banner(receipt.result.status.value, receipt.result.reasons)
         st.markdown("#### Your tracking details")
         st.markdown(f"**Application ID:** `{receipt.application_id}`")
         st.warning("Save the tracking code securely. It is shown here for this session and cannot be recovered from the database.")
         st.code(receipt.tracking_code, language=None)
+        receipt_run = {
+            "checks_json": [c.model_dump(mode="json") for c in receipt.result.checks],
+            "extraction_error": receipt.result.extraction_error,
+        }
+        receipt_app = {"current_status": receipt.result.status.value}
+        st.info("**Next step:** " + vendor_next_step(receipt_app, receipt_run))
+        st.button("Track this application", key="receipt_track_current", type="primary",
+                  on_click=_track_receipt, args=(receipt.application_id, receipt.tracking_code))
         st.caption(f"Run: {receipt.result.run_id} · {receipt.result.elapsed_ms / 1000:.2f}s · Persisted: {receipt.result.persisted}")
         with st.expander("Detailed validation checks"):
             st.dataframe([{"Rule": c["rule_id"], "Result": c["state"], "Check": c["label"],
@@ -578,6 +608,9 @@ def new_application() -> None:
             st.rerun()
         return
 
+    st.subheader("Start a new application")
+    st.markdown('<p class="vf-section-subtitle">Three clear steps for GST-registered Indian businesses. Use synthetic sample details only.</p>',
+                unsafe_allow_html=True)
     step = st.session_state.get("new_step", 0)
     show_step_header(step)
     values = draft()
@@ -586,8 +619,10 @@ def new_application() -> None:
             entered = business_fields(values)
             next_clicked = st.form_submit_button("Continue →", type="primary")
         if next_clicked:
-            if not entered["legal_name"].strip() or not entered["contact_email"].strip():
-                st.error("Legal business name and contact email are required to continue.")
+            if not entered["legal_name"].strip():
+                st.error("Enter the legal business name to continue.")
+            elif not valid_contact_email(entered["contact_email"]):
+                st.error("Enter a valid contact email address, such as contact@example.com.")
             else:
                 values.update(entered)
                 st.session_state.new_step = 1
@@ -664,13 +699,10 @@ def new_application() -> None:
                 receipt = run_with_live_stages(lambda cb: service.submit(
                     vendor, pdf_input(gst_file), pdf_input(bank_file), stage_callback=cb,
                     prepared=prepared))
+                # Show ONE authoritative result and receipt, not the still-filled form.
+                # The prepared ID remains stable if a failure occurs before this point.
                 st.session_state.receipt = receipt
-                st.subheader("Application check complete")
-                result_banner(receipt.result.status.value, receipt.result.reasons)
-                st.write(f"**Application ID:** `{receipt.application_id}`")
-                st.warning("Save your private tracking code now. Do not send it to anyone else.")
-                st.code(receipt.tracking_code, language=None)
-                st.caption(f"Saved: {receipt.result.persisted} · Run: {receipt.result.run_id} · {receipt.result.elapsed_ms / 1000:.2f}s")
+                st.rerun()
             except Exception as exc:
                 st.error(safe_error(exc))
                 st.info("Keep the recovery ID and private tracking code shown above. "
@@ -727,45 +759,37 @@ def track_application() -> None:
                 recovered = run_with_live_stages(lambda cb: service.resume_submission(
                     app_id, token, VendorSubmission(**b, **k),
                     pdf_input(rgst), pdf_input(rbank), stage_callback=cb))
-                st.success(f"Submission saved on existing application {app_id}: {recovered.result.run_id}")
+                st.session_state.vendor_action_notice = (
+                    "The interrupted submission was recovered on the same application. "
+                    "Your current status and run history are shown below."
+                )
                 st.rerun()
             except Exception as exc:
                 st.error(safe_error(exc))
         return
 
     status = record["current_status"]
+    notice = st.session_state.pop("vendor_action_notice", None)
+    if notice:
+        st.success(notice)
     st.caption(f"Application ID: {app_id}")
     result_banner(status, selected_reasons(record, runs, reviews, audience="vendor"), source=record.get("decision_source", "AUTOMATED"))
+    latest_run = runs[0] if runs else None
+    latest_review = reviews[0] if reviews else None
+    owner = next_action_owner(record, latest_run, latest_review)
+    st.markdown(
+        '<div class="vf-work-owner" role="status">'
+        f'<strong>Next action: {escape(owner)}</strong><div>'
+        f'{escape(vendor_next_step(record, latest_run, latest_review))}</div></div>',
+        unsafe_allow_html=True,
+    )
 
-    # Display active administrator correction requests separately.
-    if status == "PENDING" and reviews:
-        latest_review = reviews[0]
-
-        if latest_review.get("action") == "REQUEST_CORRECTION":
-            from datetime import datetime
-
-            review_at = latest_review.get("created_at")
-            latest_run_at = (
-                runs[0].get("created_at") or runs[0].get("finished_at")
-            ) if runs else None
-
-            # A new resubmission supersedes an earlier correction request.
-            try:
-                active_request = (
-                    not review_at
-                    or not latest_run_at
-                    or datetime.fromisoformat(str(review_at).replace("Z", "+00:00"))
-                    >= datetime.fromisoformat(str(latest_run_at).replace("Z", "+00:00"))
-                )
-            except (TypeError, ValueError):
-                active_request = True
-
-            if active_request:
-                st.warning("Action required — Reviewer requested a correction")
-                st.write(
-                    latest_review.get("reason")
-                    or "Please review your application and provide the requested correction."
-                )
+    # A new saved evaluation supersedes an earlier correction instruction.
+    if status == "PENDING" and active_review_request(latest_review, latest_run):
+        st.warning("Action required — Reviewer requested a correction")
+        from vendorflow.ui_support import vendor_safe_review_reason
+        st.write(vendor_safe_review_reason(str(latest_review.get("reason") or
+                    "Please review your application and provide the requested correction.")))
     if reviews and record.get("decision_source") == "MANUAL":
         st.caption("Latest reviewer decision and rationale are shown above.")
     if runs:
@@ -780,8 +804,16 @@ def track_application() -> None:
         st.info("This outcome is final in the MVP. Contact the demo administrator if further assistance is needed.")
         return
 
-    st.markdown("### Fix and resubmit")
-    st.info("Only update the details that need correction. Your previously uploaded PDFs are reused unless you replace them.")
+    st.markdown("### Correct or retry")
+    if owner == "Reviewer":
+        st.caption("A reviewer is handling this case. You can still submit a correction if you have new information.")
+    elif owner == "Technical retry":
+        st.caption("You may retry after a technical processing failure. The same application ID is preserved.")
+    st.info("Only update details that need correction. The PDFs from your latest committed run are reused unless replaced.")
+    reveal_form = st.checkbox("Show correction and retry form", value=(owner == "Vendor"),
+                              key="vendor_correction_form_visible")
+    if not reveal_form:
+        return
     current = record.get("payload_json") or {}
     with st.form("correction_form"):
         st.markdown("**Business details**")
@@ -793,8 +825,11 @@ def track_application() -> None:
         bank = st.file_uploader("Replace bank proof · PDF", type="pdf", key="edit_bank_file")
         submit = st.form_submit_button("Resubmit for checking", type="primary")
     if submit:
-        if not b["legal_name"].strip() or not b["contact_email"].strip():
-            st.error("Legal business name and contact email are required.")
+        if not b["legal_name"].strip():
+            st.error("Enter the legal business name.")
+            return
+        if not valid_contact_email(b["contact_email"]):
+            st.error("Enter a valid contact email address.")
             return
         try:
             updated = VendorSubmission(**b, **k)
@@ -803,9 +838,11 @@ def track_application() -> None:
                 bank_upload=pdf_input(bank), stage_callback=cb,
                 expected_revision=int(record.get("revision", 0)),
                 expected_latest_run_id=record.get("latest_run_id")))
-            result_banner(outcome.status.value, outcome.reasons)
-            st.success(f"New run saved: {outcome.run_id}. Refresh the tracking view to see updated history.")
-            st.info("Use the tracking view or refresh the page to see the updated application and history.")
+            st.session_state.vendor_action_notice = (
+                "Your updated application was saved. The latest status and history are shown below."
+            )
+            # Freshly read the authoritative revision and decision on the rerun.
+            st.rerun()
         except Exception as exc:
             st.error(safe_error(exc))
             st.info("Do not immediately retry if saving was interrupted; check the existing run history first.")
@@ -860,6 +897,7 @@ def admin_console() -> None:
         if st.button("Log out of Admin Console", key="admin_logout", width="stretch"):
             st.session_state.admin_authorized = False
             st.session_state.pop("admin_selected_case_id", None)
+            st.session_state.pop("admin_evidence_requested", None)
             st.rerun()
     # Changing sections never keeps a previously armed decision form.
     if st.session_state.get("_vf_previous_admin_view") != view:
@@ -873,7 +911,17 @@ def admin_console() -> None:
     try:
         repo, _ = repo_and_service()
         apps = repo.admin_queue("ALL")
-        run_rows = repo.client.table("runs").select("elapsed_ms").execute().data
+        run_rows = (repo.client.table("runs")
+                    .select("id,application_id,checks_json,reasons_json,elapsed_ms,created_at,finished_at,extraction_error")
+                    .limit(1000).execute().data)
+        reviewer_rows = (repo.client.table("review_actions")
+                         .select("application_id,action,reason,created_at,reviewed_run_id")
+                         .order("created_at", desc=True).limit(1000).execute().data)
+        latest_runs = {r["id"]: r for r in run_rows if r.get("id")}
+        latest_reviews = {}
+        for action_row in reviewer_rows:
+            if action_row.get("application_id") not in latest_reviews:
+                latest_reviews[action_row["application_id"]] = action_row
     except Exception as exc:
         st.error(safe_error(exc))
         return
@@ -955,12 +1003,11 @@ def admin_console() -> None:
                     '<p class="vf-admin-panel-note">Try a different search or switch to All applications.</p></div>',
                     unsafe_allow_html=True)
         return
-    st.dataframe([{"Application ID": a.get("id"),
-                   "Business": (a.get("payload_json") or {}).get("legal_name", ""),
-                   "Status": display_status(a.get("current_status", "")),
-                   "Submitted": str(a.get("created_at", ""))[:10]}
-                  for a in subset], hide_index=True, width="stretch",
-                  row_height=38, height=min(370, 48 + 38 * len(subset)))
+    st.dataframe(admin_queue_rows(subset, latest_runs, latest_reviews),
+                 hide_index=True, width="stretch", row_height=38,
+                 height=min(390, 48 + 38 * len(subset)))
+    st.caption("Action owner identifies the next step; it is not an additional decision status. "
+               "Age is time since the application was created, not an SLA.")
     by_id = {a["id"]: a for a in subset}
     # Prevent accidental carryover after decision: NEVER auto-select another vendor.
     if st.session_state.pop("admin_clear_selection", False):
@@ -982,10 +1029,6 @@ def admin_console() -> None:
     try:
         runs = repo.runs_for_application(selected_id)
         reviews = repo.review_history(selected_id)
-        docs = (repo.client.table("documents")
-                .select("doc_type,filename,version,uploaded_at")
-                .eq("application_id", selected_id)
-                .order("uploaded_at", desc=True).execute().data)
     except Exception as exc:
         st.error(safe_error(exc))
         return
@@ -998,6 +1041,13 @@ def admin_console() -> None:
                 unsafe_allow_html=True)
     result_banner(app["current_status"], selected_reasons(app, runs, reviews),
                   source=app.get("decision_source", "AUTOMATED"), audience="admin")
+    from vendorflow.ux_support import primary_review_issue
+    st.caption(f"Revision {int(app.get('revision', 0))} · "
+               f"Next action: {next_action_owner(app, runs[0] if runs else None, reviews[0] if reviews else None)}"
+               f" · {primary_review_issue(runs[0] if runs else None, reviews[0] if reviews else None)}")
+    # Bound to this exact case+run, never to the latest uncommitted upload.
+    selected_run = runs[0] if runs else None
+    current_evidence_key = (selected_id, selected_run.get("id") if selected_run else None)
 
     if runs:
         checks = runs[0].get("checks_json") or []
@@ -1007,7 +1057,8 @@ def admin_console() -> None:
             for c in flagged:
                 label = ("Possible duplicate of an approved vendor" if c.get("rule_id") == "R12"
                          else str(c.get("label") or c.get("rule_id") or "Review required"))
-                note = str(c.get("vendor_message") or "This check requires human attention.")
+                note = str(c.get("admin_detail") or c.get("vendor_message") or
+                           "This check requires human attention.")
                 st.markdown(
                     '<div class="vf-admin-issue">'
                     f'<p class="vf-admin-issue-label">{escape(label)}</p>'
@@ -1020,10 +1071,36 @@ def admin_console() -> None:
         st.markdown("#### Submitted information vs. PDF evidence")
         st.caption("Highlighted rows need attention. Sensitive identifiers are masked by default.")
         admin_evidence_table(app.get("payload_json") or {}, runs[0].get("extracted_json") or {}, checks)
-        check_results(runs[0])
+        staff_check_results(runs[0])
         timeline(runs[0])
     else:
         st.info("No completed automated evaluation is available for this case.")
+    with st.expander("Verified PDF evidence · staff only"):
+        if selected_run:
+            pdf_types = committed_pdf_types(selected_run)
+            if pdf_types:
+                st.caption("Only PDFs referenced by the latest committed run can be downloaded. "
+                           "Files are checked against the saved SHA-256 before delivery.")
+                if st.button("Load this run's verified PDFs", key=f"admin_load_evidence_{selected_id}"):
+                    st.session_state["admin_evidence_requested"] = current_evidence_key
+                if st.session_state.get("admin_evidence_requested") == current_evidence_key:
+                    for doc_type in pdf_types:
+                        try:
+                            pdf = repo.load_run_document(selected_id, selected_run["id"], doc_type)
+                            if pdf is not None:
+                                st.download_button(
+                                    f"Download {doc_type} · committed PDF",
+                                    data=pdf.content,
+                                    file_name=f"{selected_id}_{selected_run['id']}_{doc_type}.pdf",
+                                    mime="application/pdf",
+                                    key=f"admin_evidence_{selected_id}_{selected_run['id']}_{doc_type}",
+                                )
+                        except Exception:
+                            st.error(f"The {doc_type} PDF could not be verified. No download was provided.")
+            else:
+                st.caption("No committed PDF references are available for this run.")
+        else:
+            st.caption("No completed run is available; there is no verified evidence to download.")
     with st.expander("Document versions and audit history"):
         st.markdown("**Exact PDF versions bound to each committed evaluation**")
         evidence_rows = []
@@ -1055,6 +1132,9 @@ def admin_console() -> None:
     if app.get("current_status") != "PENDING":
         st.info("Final decision recorded. No further administrator actions are available for this case.")
         return
+    if not runs:
+        st.info("The vendor must resume this interrupted application before a reviewer can decide.")
+        return
     st.markdown('<div class="vf-admin-divider"></div>', unsafe_allow_html=True)
     st.markdown('<p class="vf-admin-eyebrow">Decision desk</p>', unsafe_allow_html=True)
     st.markdown('<h2 class="vf-admin-heading">Choose a resolution</h2>', unsafe_allow_html=True)
@@ -1067,6 +1147,7 @@ def admin_console() -> None:
         reason = st.text_area("Reason shown to vendor and retained in audit history", max_chars=1000,
                               placeholder="Explain the specific evidence reviewed or correction required.")
         confirm_case = st.checkbox(f"I confirm this action applies to {selected_id}", value=False)
+        reviewed_evidence = st.checkbox("For approval, I have reviewed the available evidence and understand this is not official verification.", value=False)
         first, second, third = st.columns(3)
         with first:
             approve = st.form_submit_button("✓ Approve after review")
@@ -1081,6 +1162,9 @@ def admin_console() -> None:
             return
         if not confirm_case:
             st.error(f"Confirm the application ID ({selected_id}) before saving.")
+            return
+        if action == "APPROVE" and not reviewed_evidence:
+            st.error("Confirm that you reviewed the available evidence before recording manual approval.")
             return
         # No repeat of an unchanged correction message. Backend still protects terminal cases.
         if action == "REQUEST_CORRECTION" and reviews:
@@ -1109,6 +1193,39 @@ def admin_console() -> None:
             st.rerun()
         except Exception as exc:
             st.error(safe_error(exc))
+
+
+def _track_receipt(application_id: str, tracking_code: str) -> None:
+    """Callback avoids mutating a navigation widget after it was rendered."""
+    st.session_state.vendor_auth = (application_id, tracking_code)
+    st.session_state.vendor_page = "Track / correct application"
+
+
+def _choose_vendor_page(destination: str) -> None:
+    """Button callback runs before the new Streamlit widget tree is rendered."""
+    if destination in VENDOR_NAV:
+        st.session_state.vendor_page = destination
+
+
+def vendor_welcome() -> None:
+    st.subheader("How can we help you today?")
+    st.markdown('<div class="vf-welcome">'
+                '<section class="vf-welcome-panel"><h3>Submit a new application</h3>'
+                '<p>Enter business and banking details, upload two PDFs, and get an explained result.</p></section>'
+                '<section class="vf-welcome-panel"><h3>Track or correct a submission</h3>'
+                '<p>Use your application ID and private tracking code to view a decision or fix an issue.</p></section>'
+                '</div>', unsafe_allow_html=True)
+    a, b = st.columns(2)
+    with a:
+        st.button("Start a new application", type="primary", width="stretch",
+                  on_click=_choose_vendor_page, args=("New application",), key="welcome_new")
+    with b:
+        st.button("Track or correct", width="stretch",
+                  on_click=_choose_vendor_page, args=("Track / correct application",), key="welcome_track")
+    st.caption("India-only GST-registered vendor demo · Use synthetic records only · "
+               "PDF maximum 5 MB each · Save the private tracking code after submission.")
+    st.info("Approved means the submitted fields matched the provided documents in this prototype. "
+            "It is not an official GST, PAN or bank-ownership verification.")
 
 
 # Vendor-first navigation: staff tools are not displayed on the applicant landing page.
@@ -1147,10 +1264,16 @@ else:
 if is_admin_portal:
     admin_console()
 else:
-    page = st.segmented_control("Vendor navigation", ["New application", "Track / correct application"],
-                                default="New application", required=True, key="vendor_page",
+    # Initialise the keyed navigation once; callback updates its Session State.
+    # Passing default= as well would trigger Streamlit's duplicate-default warning.
+    if st.session_state.get("vendor_page") not in VENDOR_NAV:
+        st.session_state["vendor_page"] = "Welcome"
+    page = st.segmented_control("Vendor navigation", VENDOR_NAV,
+                                required=True, key="vendor_page",
                                 label_visibility="collapsed")
     if page == "Track / correct application":
         track_application()
-    else:
+    elif page == "New application":
         new_application()
+    else:
+        vendor_welcome()

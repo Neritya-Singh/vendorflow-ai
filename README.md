@@ -1,49 +1,49 @@
 # VendorFlow AI — Zamp AI / PS-2 Vendor Onboarding
 
-**Build state:** Backend and five live synthetic Gemini workflows verified by user.
-Stage 3.3 Supabase integration code written, **not yet connected or live tested**.
-Not deployed; frontend is not built.
+**v1.1 development copy — Stage 6.3 UX changes prepared, not released.**
 
-## Architecture
+This checkout is intended for `stage6-v1.1-remediation` and the isolated
+`vendorflow-v11-staging` Supabase project. The production MVP remains on GitHub
+`main` until the separate Stage 6.5 release gate. Use **synthetic vendor documents only**.
 
-India-only GST-registered **synthetic demo**. PDF documents are read using
-PyMuPDF. Google Gemini extracts structured fields (`gemini-3.5-flash-lite` has been
-verified live by user). Deterministic Python policy validates PAN/GSTIN/IFSC,
-document consistency, duplicate evidence and extraction completeness.
-Only ALL-PASS auto-approves. Fixable issues remain PENDING; rejection requires
-an explicit admin reason. Approval **is not official government/bank verification**.
+## What the product does
 
-## Local Python setup (Ubuntu)
+An India-only, GST-registered vendor onboarding demo with:
+
+- A three-step vendor application with GST and bank PDFs; recovery ID + private code issued before the first save.
+- A document-consistency decision: **Approved, Pending Review or Rejected**, with plain-language reasons and tracked next actions.
+- AI-assisted PDF extraction; deterministic PAN/GSTIN/IFSC, evidence-grounding, and approved-GSTIN duplicate rules.
+- Staff exception queue, masked submitted-vs-PDF comparison, authenticated run-bound PDF downloads, revision-safe manual review, and an audit trail.
+- Real persisted workflow stages and processing time. These metrics are **not** a measured reduction in vendor waiting time.
+
+Approval reflects prototype document consistency, **not** government registration validation,
+independent bank verification or legal KYC/KYB. Scanned/unreadable PDFs remain review-bound.
+
+## Staging-only local setup (Ubuntu)
+
+Create a separate local `.env` in this development checkout using `.env.example`, with
+**staging** Supabase values only. Set `GEMINI_API_KEY`, `GEMINI_MODEL` and
+`ADMIN_PASSWORD` locally. **Never share or commit `.env` or Streamlit secrets.**
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -m pytest -q
+PYTHONPATH=. python -m pytest -q
+streamlit run app.py
 ```
 
-Use a private `.env` copied from `.env.example`; never commit or share it.
-Existing keys in your local `.env` are retained when you extract an updated ZIP.
+The Stage 6.3 offline suite is **99/99 passing**. The UI still requires a real
+staging desktop/mobile browser acceptance pass before Stage 6.3 is declared done.
+See [`STAGE6_3_HANDOFF.md`](STAGE6_3_HANDOFF.md) for the exact review checklist.
 
-## Live Gemini local test (NO DB persistence)
+## Environment safeguards
 
-```bash
-python run_backend.py --scenario happy --demo-empty-registry
-```
+- Do not run v1.1 locally with the **production Supabase secret or URL**.
+- Database migrations for Stages 6.1 and 6.2 are already installed in isolated staging;
+  **do not rerun those migrations or `schema.sql` there**.
+- Keep the original working deployed MVP intact until the controlled Stage 6.5 release.
+- The staff password and vendor ID+tracking-code model are demo access controls,
+  not a production identity and authorization solution.
 
-## Supabase integration
-
-See `supabase/SETUP.md`. **Wait for step-by-step manual confirmation.**
-1. Create project, 2. SQL Editor run `supabase/schema.sql`, 3. local server
-   secret configuration, 4. `python run_persisted.py --scenario happy`.
-
-Supabase code provides a private `vendor-documents` bucket, versioned PDFs,
-application tracking via secret token (only SHA-256 digest stored), immutable
-executions, safe duplicate lookup, admin review actions and corrections.
-The SQL trigger commits each run and latest application status together.
-
-Only synthetic documents. Do not include bank accounts or PANs belonging to real people.
-
-## Current progress
-
-See `PROGRESS.md` for verified results and remaining stages.
+See [`PROGRESS.md`](PROGRESS.md) for stage status, and the Stage 6.1/6.2 handoffs for tested integrity and recovery guarantees.
