@@ -20,3 +20,12 @@ Download and merge Stage 3.4 frontend add-on into user's existing project, insta
 - All data are synthetic; Approved is document-consistency policy, not legal/GST/bank verification.
 - Public demo must not use real financial documents.
 - Existing API keys and tracking codes should never be pasted into chat.
+
+
+## Stage 6.2 — Staging-only development update (2026-11-10)
+
+- Code implemented locally: revision CAS, run-linked source-PDF manifests, immutable PDF metadata, recoverable initial receipt/idempotent retry, and lost run-ack recovery.
+- Full offline suite: **82/82 passing**. Includes all Stage 6.1 regressions and the four previously RED Stage 6.2 tests.
+- Staging migration `stage6_2_revision_provenance_recovery` applied; read-only checks show all four tables empty and new columns/trigger present.
+- **Pending manual gates:** run `supabase/stage6_2_sql_smoke_rollback.sql` in staging and `scripts/stage6_2_concurrency_gate.py` with staging credentials. Real Supabase Storage API fault tests are still an E2E release prerequisite.
+- **Not yet committed to GitHub**; production GitHub `main`, database and Streamlit deployment remain unchanged.

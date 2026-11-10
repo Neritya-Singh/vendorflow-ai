@@ -17,6 +17,7 @@ from vendorflow import GeminiExtractor, PDFInput, VendorSubmission, UploadError
 from vendorflow.persistence import (
     MinimumIntakeError, PersistenceError, PersistentVendorService,
     SupabaseRepository, TerminalApplication, UnauthorizedTracking,
+    PreparedIntake, prepare_intake,
 )
 from vendorflow.admin_login_guard import (
     clear_admin_login_failures, remaining_admin_lockout, record_admin_login_failure,
@@ -570,6 +571,7 @@ def new_application() -> None:
         if st.button("Start another application"):
             st.session_state.pop("receipt", None)
             st.session_state.pop("new_draft", None)
+            st.session_state.pop("prepared_intake", None)
             st.session_state.new_step = 0
             for key in [k for k in list(st.session_state) if k.startswith("new_")]:
                 st.session_state.pop(key, None)
@@ -629,6 +631,15 @@ def new_application() -> None:
                 '</div>',
                 unsafe_allow_html=True,
             )
+        # Issue the receipt credentials BEFORE any network/database write.
+        # The vendor can track/recover the same application after a crash.
+        if "prepared_intake" not in st.session_state:
+            st.session_state.prepared_intake = prepare_intake()
+        prepared = st.session_state.prepared_intake
+        st.info("Save these private recovery details before submitting. If the browser "
+                "closes or saving fails, use Track / Resume with the same details.")
+        st.write(f"**Recovery application ID:** `{prepared.application_id}`")
+        st.code(prepared.tracking_code, language=None)
         with st.form("new_documents"):
             st.markdown("**Upload supporting documents**")
             st.caption("Upload a GST registration PDF and a bank letter or cancelled cheque PDF. "
@@ -651,7 +662,8 @@ def new_application() -> None:
                 vendor = VendorSubmission(**values)
                 _, service = repo_and_service()
                 receipt = run_with_live_stages(lambda cb: service.submit(
-                    vendor, pdf_input(gst_file), pdf_input(bank_file), stage_callback=cb))
+                    vendor, pdf_input(gst_file), pdf_input(bank_file), stage_callback=cb,
+                    prepared=prepared))
                 st.session_state.receipt = receipt
                 st.subheader("Application check complete")
                 result_banner(receipt.result.status.value, receipt.result.reasons)
@@ -661,7 +673,9 @@ def new_application() -> None:
                 st.caption(f"Saved: {receipt.result.persisted} · Run: {receipt.result.run_id} · {receipt.result.elapsed_ms / 1000:.2f}s")
             except Exception as exc:
                 st.error(safe_error(exc))
-                st.info("An interrupted submission may have created a preliminary record. Do not repeatedly resubmit without checking.")
+                st.info("Keep the recovery ID and private tracking code shown above. "
+                        "You can retry this same application without creating a second one, "
+                        "or use Track / Resume after reopening the page.")
 
 
 def track_application() -> None:
@@ -695,6 +709,28 @@ def track_application() -> None:
     except Exception as exc:
         st.session_state.pop("vendor_auth", None)
         st.error(safe_error(exc))
+        return
+
+    if not runs and record["current_status"] == "PENDING":
+        st.warning("Submission interrupted before the first decision was saved. "
+                   "You can resume using this same application ID and tracking code.")
+        st.caption("Upload your documents again to ensure the resumed decision uses exactly "
+                   "the PDFs you choose. Earlier incomplete uploads are never reused automatically.")
+        with st.form("resume_initial_form"):
+            b = business_fields(record.get("payload_json") or {}, prefix="resume")
+            k = bank_fields(record.get("payload_json") or {}, prefix="resume")
+            rgst = st.file_uploader("GST certificate · PDF", type="pdf", key="resume_gst")
+            rbank = st.file_uploader("Bank proof · PDF", type="pdf", key="resume_bank")
+            resume = st.form_submit_button("Resume this application", type="primary")
+        if resume:
+            try:
+                recovered = run_with_live_stages(lambda cb: service.resume_submission(
+                    app_id, token, VendorSubmission(**b, **k),
+                    pdf_input(rgst), pdf_input(rbank), stage_callback=cb))
+                st.success(f"Submission saved on existing application {app_id}: {recovered.result.run_id}")
+                st.rerun()
+            except Exception as exc:
+                st.error(safe_error(exc))
         return
 
     status = record["current_status"]
@@ -764,7 +800,9 @@ def track_application() -> None:
             updated = VendorSubmission(**b, **k)
             outcome = run_with_live_stages(lambda cb: service.resubmit(
                 app_id, token, updated, gst_upload=pdf_input(gst),
-                bank_upload=pdf_input(bank), stage_callback=cb))
+                bank_upload=pdf_input(bank), stage_callback=cb,
+                expected_revision=int(record.get("revision", 0)),
+                expected_latest_run_id=record.get("latest_run_id")))
             result_banner(outcome.status.value, outcome.reasons)
             st.success(f"New run saved: {outcome.run_id}. Refresh the tracking view to see updated history.")
             st.info("Use the tracking view or refresh the page to see the updated application and history.")
@@ -987,12 +1025,20 @@ def admin_console() -> None:
     else:
         st.info("No completed automated evaluation is available for this case.")
     with st.expander("Document versions and audit history"):
-        st.markdown("**Private document metadata**")
-        if docs:
-            st.dataframe(docs, hide_index=True, width="stretch")
+        st.markdown("**Exact PDF versions bound to each committed evaluation**")
+        evidence_rows = []
+        for run in runs:
+            for entry in run.get("document_manifest") or []:
+                evidence_rows.append({"Run": run.get("id"),
+                                      "Type": entry.get("doc_type"),
+                                      "Version": entry.get("version"),
+                                      "SHA-256": entry.get("file_sha256", "")[:16] + "…"})
+        if evidence_rows:
+            st.dataframe(evidence_rows, hide_index=True, width="stretch")
         else:
-            st.caption("No documents recorded.")
-        st.caption("Only private PDF metadata is shown; public document links are never generated.")
+            st.caption("No committed document references; replacement PDFs must be uploaded for evaluation.")
+        st.caption("Staged or interrupted uploads are not evidence for a completed run. "
+                   "Private PDFs are never exposed through public links.")
         st.markdown("**Reviewer actions**")
         if reviews:
             st.dataframe([{"Action": e.get("action"), "Reason": e.get("reason"),
@@ -1052,7 +1098,9 @@ def admin_console() -> None:
                     st.info("This identical correction request is already recorded; no duplicate was saved.")
                     return
         try:
-            repo.admin_review(selected_id, action, reason)
+            repo.admin_review(selected_id, action, reason,
+                              expected_revision=int(app.get("revision", 0)),
+                              expected_latest_run_id=app.get("latest_run_id"))
             st.session_state["admin_action_notice"] = (
                 f"{action.replace('_', ' ').title()} saved for {selected_id}. "
                 "Select another case to continue."

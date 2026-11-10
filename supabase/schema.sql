@@ -14,6 +14,7 @@ create table if not exists public.applications (
     decision_source text not null default 'AUTOMATED'
         check (decision_source in ('AUTOMATED','MANUAL')),
     latest_run_id text,
+    revision integer not null default 0 check (revision >= 0),
     constraint approved_gstin_valid_format check (current_status <> 'APPROVED' or gstin_normalized ~ '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$'),
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
@@ -48,6 +49,8 @@ create table if not exists public.runs (
     started_at timestamptz not null,
     finished_at timestamptz not null,
     elapsed_ms integer not null check (elapsed_ms >= 0),
+    expected_revision integer not null default 0 check (expected_revision >= 0),
+    document_manifest jsonb not null default '[]'::jsonb check (jsonb_typeof(document_manifest) = 'array'),
     created_at timestamptz not null default now()
 );
 
@@ -57,6 +60,8 @@ create table if not exists public.review_actions (
     action text not null check (action in ('APPROVE','REQUEST_CORRECTION','REJECT')),
     reason text not null check (char_length(btrim(reason)) >= 3),
     actor text not null default 'demo-admin',
+    expected_revision integer not null default 0 check (expected_revision >= 0),
+    reviewed_run_id text,
     created_at timestamptz not null default now()
 );
 
@@ -66,45 +71,17 @@ create index if not exists idx_docs_application on public.documents (application
 create index if not exists idx_runs_application on public.runs (application_id,started_at desc);
 create index if not exists idx_reviews_application on public.review_actions (application_id,created_at desc);
 
--- This guard commits the run and current app status in ONE database transaction.
--- If this trigger raises, the run insert is rolled back automatically.
-create or replace function public.vendorflow_commit_run()
-returns trigger language plpgsql security invoker set search_path = '' as $$
-declare app_status text;
-begin
-    select current_status into app_status
-    from public.applications where id = new.application_id for update;
-    if app_status is null then
-        raise exception 'Application does not exist';
-    end if;
-    if app_status in ('APPROVED','REJECTED') then
-        raise exception 'A terminal application cannot be resubmitted';
-    end if;
-    if new.trigger = 'submission' and exists (
-        select 1 from public.runs where application_id = new.application_id and id <> new.id
-    ) then
-        raise exception 'Initial submission already has a run';
-    end if;
-    if new.trigger = 'resubmission' and not exists (
-        select 1 from public.runs where application_id = new.application_id and id <> new.id
-    ) then
-        raise exception 'Cannot resubmit an application with no previous run';
-    end if;
-    update public.applications set
-        payload_json = new.payload_json,
-        current_status = new.status,
-        decision_source = 'AUTOMATED',
-        latest_run_id = new.id,
-        updated_at = now()
-    where id = new.application_id;
-    return new;
-end;
+-- Stage 6.2: revision CAS, immutable PDF provenance and existing audit protections.
+CREATE OR REPLACE FUNCTION public.vendorflow_prevent_document_mutation()
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = '' AS $$
+BEGIN
+  RAISE EXCEPTION 'Saved document versions cannot be modified or deleted';
+END;
 $$;
-
-drop trigger if exists trg_vendorflow_commit_run on public.runs;
-create trigger trg_vendorflow_commit_run
-    after insert on public.runs for each row
-    execute function public.vendorflow_commit_run();
+DROP TRIGGER IF EXISTS trg_vendorflow_immutable_document ON public.documents;
+CREATE TRIGGER trg_vendorflow_immutable_document
+  BEFORE UPDATE OR DELETE ON public.documents FOR EACH ROW
+  EXECUTE FUNCTION public.vendorflow_prevent_document_mutation();
 
 -- Completed runs are immutable audit records.
 create or replace function public.vendorflow_prevent_run_mutation()
@@ -118,31 +95,113 @@ create trigger trg_vendorflow_no_run_mutation
     before update or delete on public.runs for each row
     execute function public.vendorflow_prevent_run_mutation();
 
--- Admin decisions and latest visible status also commit in one transaction.
-create or replace function public.vendorflow_apply_review_action()
-returns trigger language plpgsql security invoker set search_path = '' as $$
-declare app_status text;
-begin
-    select current_status into app_status from public.applications
-      where id = new.application_id for update;
-    if app_status is distinct from 'PENDING' then
-        raise exception 'Only pending applications can receive review actions';
-    end if;
-    update public.applications set
-        current_status = case
-            when new.action = 'APPROVE' then 'APPROVED'
-            when new.action = 'REJECT' then 'REJECTED'
-            else 'PENDING' end,
-        decision_source = 'MANUAL',
-        updated_at = now()
-    where id = new.application_id;
-    return new;
-end;
+
+CREATE OR REPLACE FUNCTION public.vendorflow_commit_run()
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = '' AS $$
+DECLARE
+  app_record record;
+  entry jsonb;
+  matched_count integer;
+  seen_types text[] := ARRAY[]::text[];
+  entry_type text;
+BEGIN
+  -- FOR UPDATE serializes vendor resubmissions and admin decisions on the app.
+  SELECT revision, current_status, latest_run_id
+    INTO app_record FROM public.applications
+    WHERE id = NEW.application_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Application does not exist';
+  END IF;
+  IF app_record.current_status IN ('APPROVED','REJECTED') THEN
+    RAISE EXCEPTION 'A terminal application cannot be resubmitted';
+  END IF;
+  IF NEW.expected_revision <> app_record.revision THEN
+    RAISE EXCEPTION 'stale_revision: application changed before this run was saved';
+  END IF;
+  IF NEW.trigger = 'submission' AND app_record.latest_run_id IS NOT NULL THEN
+    RAISE EXCEPTION 'Initial submission already has a run';
+  END IF;
+  IF NEW.trigger = 'resubmission' AND app_record.latest_run_id IS NULL THEN
+    RAISE EXCEPTION 'Cannot resubmit an application with no previous run';
+  END IF;
+  IF jsonb_typeof(NEW.document_manifest) IS DISTINCT FROM 'array'
+    OR jsonb_array_length(NEW.document_manifest) > 2 THEN
+    RAISE EXCEPTION 'Invalid source-document manifest';
+  END IF;
+  FOR entry IN SELECT value FROM jsonb_array_elements(NEW.document_manifest) LOOP
+    entry_type := entry->>'doc_type';
+    IF entry_type NOT IN ('GST','BANK') OR entry_type = ANY(seen_types) THEN
+      RAISE EXCEPTION 'Duplicate or invalid source-document type';
+    END IF;
+    seen_types := array_append(seen_types, entry_type);
+    SELECT count(*) INTO matched_count FROM public.documents d
+      WHERE d.id = (entry->>'id')::uuid
+        AND d.application_id = NEW.application_id
+        AND d.doc_type = entry_type
+        AND d.version = (entry->>'version')::integer
+        AND d.file_sha256 = entry->>'file_sha256'
+        AND d.storage_path = entry->>'storage_path';
+    IF matched_count <> 1 THEN
+      RAISE EXCEPTION 'Source-document manifest does not match saved version';
+    END IF;
+  END LOOP;
+  IF NEW.status = 'APPROVED' AND NOT ('GST' = ANY(seen_types) AND 'BANK' = ANY(seen_types)) THEN
+    RAISE EXCEPTION 'Automatic approval requires both verified source-document versions';
+  END IF;
+  UPDATE public.applications SET
+    payload_json = NEW.payload_json,
+    current_status = NEW.status,
+    decision_source = 'AUTOMATED',
+    latest_run_id = NEW.id,
+    revision = revision + 1,
+    updated_at = now()
+  WHERE id = NEW.application_id;
+  RETURN NEW;
+END;
 $$;
-drop trigger if exists trg_vendorflow_apply_review_action on public.review_actions;
-create trigger trg_vendorflow_apply_review_action
-    after insert on public.review_actions for each row
-    execute function public.vendorflow_apply_review_action();
+
+CREATE OR REPLACE FUNCTION public.vendorflow_apply_review_action()
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = '' AS $$
+DECLARE
+  app_record record;
+BEGIN
+  SELECT current_status, latest_run_id, revision INTO app_record
+    FROM public.applications WHERE id = NEW.application_id FOR UPDATE;
+  IF NOT FOUND OR app_record.current_status IS DISTINCT FROM 'PENDING'
+    OR app_record.latest_run_id IS NULL THEN
+    RAISE EXCEPTION 'Only completed pending applications can receive review actions';
+  END IF;
+  IF NEW.expected_revision <> app_record.revision
+     OR NEW.reviewed_run_id IS DISTINCT FROM app_record.latest_run_id THEN
+    RAISE EXCEPTION 'stale_revision: reviewed evidence is no longer current';
+  END IF;
+  UPDATE public.applications SET
+    current_status = CASE
+      WHEN NEW.action = 'APPROVE' THEN 'APPROVED'
+      WHEN NEW.action = 'REJECT' THEN 'REJECTED'
+      ELSE 'PENDING' END,
+    decision_source = 'MANUAL',
+    revision = revision + 1,
+    updated_at = now()
+  WHERE id = NEW.application_id;
+  RETURN NEW;
+END;
+$$;
+
+-- Existing triggers stay attached to the updated functions.
+REVOKE EXECUTE ON FUNCTION public.vendorflow_prevent_document_mutation()
+  FROM public, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.vendorflow_commit_run()
+  FROM public, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.vendorflow_apply_review_action()
+  FROM public, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_vendorflow_commit_run ON public.runs;
+CREATE TRIGGER trg_vendorflow_commit_run AFTER INSERT ON public.runs
+  FOR EACH ROW EXECUTE FUNCTION public.vendorflow_commit_run();
+DROP TRIGGER IF EXISTS trg_vendorflow_apply_review_action ON public.review_actions;
+CREATE TRIGGER trg_vendorflow_apply_review_action AFTER INSERT ON public.review_actions
+  FOR EACH ROW EXECUTE FUNCTION public.vendorflow_apply_review_action();
 
 -- Server-only backend. No anon/authenticated table grants or RLS policies.
 alter table public.applications enable row level security;
@@ -153,6 +212,7 @@ revoke all on table public.applications, public.documents, public.runs, public.r
 revoke execute on function public.vendorflow_commit_run() from public, anon, authenticated;
 revoke execute on function public.vendorflow_prevent_run_mutation() from public, anon, authenticated;
 revoke execute on function public.vendorflow_apply_review_action() from public, anon, authenticated;
+revoke execute on function public.vendorflow_prevent_document_mutation() from public, anon, authenticated;
 
 -- Private bucket. Its objects are never exposed through public URLs.
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
