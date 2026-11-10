@@ -28,7 +28,7 @@ EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 def norm_id(value: str | None) -> str:
-    return re.sub(r"\s+", "", value or "").upper()
+    return re.sub(r"[ \t\n\r\f\v]+", "", value or "").upper()
 
 
 def norm_name(value: str | None) -> str:
@@ -39,6 +39,32 @@ def norm_name(value: str | None) -> str:
 def norm_state(value: str | None) -> str:
     return re.sub(r"\s+", " ", (value or "").upper().strip())
 
+
+
+# Verify the entire, unmasked numeric value in a named account-number field.
+_ACCOUNT_LABEL = re.compile(
+    r"(?i)^[ \t]*(?:bank[ \t]+)?(?:account[ \t]*(?:number|no\.?|#)|a[ \t]*/?[ \t]*c[ \t]*(?:number|no\.?))[ \t]*[:\-]?[ \t]*(.*)$"
+)
+_ACCOUNT_DIGITS = re.compile(r"^[0-9]+(?:[ \t-]+[0-9]+)*$")
+
+
+def bank_account_grounded(value: str | None, document_text: str) -> bool:
+    """Full field equality; never accept a shortened substring or masked value."""
+    claimed = (value or "").strip()
+    if not _ACCOUNT_DIGITS.fullmatch(claimed):
+        return False
+    expected = re.sub(r"[ \t-]+", "", claimed)
+    lines = (document_text or "").splitlines()
+    for pos, line in enumerate(lines):
+        found = _ACCOUNT_LABEL.fullmatch(line)
+        if not found:
+            continue
+        printed = found.group(1).strip()
+        if not printed and pos + 1 < len(lines):
+            printed = lines[pos + 1].strip()
+        if _ACCOUNT_DIGITS.fullmatch(printed) and re.sub(r"[ \t-]+", "", printed) == expected:
+            return True
+    return False
 
 
 def normalize_submission(v: VendorSubmission) -> VendorSubmission:
@@ -75,10 +101,14 @@ def checks_without_duplicate(v: VendorSubmission, x: ExtractedDocuments,
         ("Bank account number", v.account_number), ("IFSC", v.ifsc),
     ) if not value.strip()]
     email_ok = bool(EMAIL_PATTERN.fullmatch(v.contact_email.strip())) if v.contact_email.strip() else False
-    add(checks, "R01", not missing and email_ok, "REQUIRED_FIELDS",
-        "Required fields", ("Complete: " + ", ".join(missing) + ".") if missing else
-        ("Enter a valid contact email address." if not email_ok else "All required fields are present."),
-        action="Complete missing fields")
+    input_issues = []
+    if missing:
+        input_issues.append("Complete: " + ", ".join(missing) + ".")
+    if not email_ok and "Contact email" not in missing:
+        input_issues.append("Enter a valid contact email address.")
+    add(checks, "R01", not input_issues, "REQUIRED_FIELDS", "Required fields",
+        " ".join(input_issues) if input_issues else "All required fields are present.",
+        action="Complete missing or invalid fields")
 
     missing_docs = [label for label, pdf in (("GST certificate", gst_pdf), ("Bank proof", bank_pdf)) if pdf is None]
     unreadable_docs = [label for label, pdf in (("GST certificate", gst_pdf), ("Bank proof", bank_pdf)) if pdf is not None and not pdf.readable]
@@ -95,12 +125,18 @@ def checks_without_duplicate(v: VendorSubmission, x: ExtractedDocuments,
     ifsc_ok = bool(IFSC_PATTERN.fullmatch(ifsc))
     add(checks, "R03", pan_ok, "PAN_FORMAT", "PAN structure", "Check the 10-character PAN format." if not pan_ok else "PAN format valid.", action="Correct PAN")
     add(checks, "R04", gstin_ok, "GSTIN_FORMAT", "GSTIN structure", "Check the 15-character GSTIN format." if not gstin_ok else "GSTIN format valid.", action="Correct GSTIN")
-    add(checks, "R05", pan == gstin[2:12] if (pan_ok and gstin_ok) else None,
-        "PAN_GSTIN_MISMATCH", "PAN in GSTIN",
-        "Your PAN does not match the PAN embedded in your GSTIN. Check both numbers.", action="Correct PAN / GSTIN")
+    pan_match = (pan == gstin[2:12]) if (pan_ok and gstin_ok) else None
+    add(checks, "R05", pan_match, "PAN_GSTIN_MISMATCH", "PAN in GSTIN",
+        "Cannot compare PAN with GSTIN until both are supplied and valid." if pan_match is None
+        else "PAN matches GSTIN." if pan_match else
+        "Your PAN does not match the PAN embedded in your GSTIN. Check both numbers.",
+        action="Correct PAN / GSTIN")
     expected_code = GST_STATE_CODES.get(norm_state(v.business_state))
-    add(checks, "R06", (gstin[:2] == expected_code) if (expected_code and gstin_ok) else None,
-        "GST_STATE_MISMATCH", "GSTIN state", "Your GSTIN state code does not match the selected business state.",
+    state_match = (gstin[:2] == expected_code) if (expected_code and gstin_ok) else None
+    add(checks, "R06", state_match, "GST_STATE_MISMATCH", "GSTIN state",
+        "Cannot compare state until both GSTIN and state are valid." if state_match is None
+        else "GSTIN state matches submission." if state_match else
+        "Your GSTIN state code does not match the selected business state.",
         action="Check GSTIN and business state")
     add(checks, "R07", ifsc_ok, "IFSC_FORMAT", "IFSC structure", "Enter an 11-character IFSC in the standard format." if not ifsc_ok else "IFSC format valid.", action="Correct IFSC")
 
@@ -110,25 +146,35 @@ def checks_without_duplicate(v: VendorSubmission, x: ExtractedDocuments,
     xgst = norm_id(x.gst.gstin)
     xlegal = norm_name(x.gst.legal_name)
     xstate = norm_state(x.gst.state)
-    gmatch = bool(gst_available and xgst and xlegal and xstate and v.legal_name.strip() and v.business_state.strip()
-                  and xgst == gstin and xlegal == norm_name(v.legal_name)
-                  and xstate == norm_state(v.business_state))
-    add(checks, "R08", gmatch if gst_available else None, "GST_DOCUMENT_MISMATCH", "GST certificate",
-        "GST certificate legal name, GSTIN or state is missing or differs from your submission.",
+    gst_ready = bool(gst_available and gstin_ok and v.legal_name.strip() and v.business_state.strip()
+                     and xgst and xlegal and xstate)
+    gst_match = (xgst == gstin and xlegal == norm_name(v.legal_name)
+                 and xstate == norm_state(v.business_state)) if gst_ready else None
+    add(checks, "R08", gst_match, "GST_DOCUMENT_MISMATCH", "GST certificate",
+        "GST certificate comparison requires valid fields and readable evidence." if gst_match is None
+        else "GST certificate fields match." if gst_match else
+        "GST certificate legal name, GSTIN or state differs from your submission.",
         action="Correct business details / replace GST PDF")
 
     xaccount = re.sub(r"\s+", "", x.bank.account_number or "")
     account = re.sub(r"\s+", "", v.account_number)
-    add(checks, "R09", bool(bank_available and account and xaccount and account == xaccount) if bank_available else None,
-        "BANK_ACCOUNT_MISMATCH", "Bank account", "Your bank account number differs from, or is missing in, the uploaded bank proof.",
+    account_match = (account == xaccount) if (bank_available and account and xaccount) else None
+    add(checks, "R09", account_match, "BANK_ACCOUNT_MISMATCH", "Bank account",
+        "Cannot compare bank account until the number and readable bank proof are supplied." if account_match is None
+        else "Bank account number matches extracted evidence." if account_match else
+        "Your bank account number differs from the uploaded bank proof.",
         action="Correct bank account / replace bank PDF")
-    add(checks, "R10", bool(bank_available and x.bank.ifsc and norm_id(x.bank.ifsc) == ifsc) if bank_available else None,
-        "BANK_IFSC_MISMATCH", "Bank IFSC", "The IFSC differs from, or is missing in, the uploaded bank proof.",
+    ifsc_match = (norm_id(x.bank.ifsc) == ifsc) if (bank_available and x.bank.ifsc and ifsc_ok) else None
+    add(checks, "R10", ifsc_match, "BANK_IFSC_MISMATCH", "Bank IFSC",
+        "Cannot compare IFSC until a valid IFSC and readable bank proof are supplied." if ifsc_match is None
+        else "Bank IFSC matches." if ifsc_match else "The IFSC differs from the uploaded bank proof.",
         action="Correct IFSC / replace bank PDF")
-    bank_name_matches_form = bool(x.bank.holder_name and v.bank_holder and norm_name(x.bank.holder_name) == norm_name(v.bank_holder))
-    bank_name_matches_legal = bool(x.bank.holder_name and v.legal_name and norm_name(x.bank.holder_name) == norm_name(v.legal_name))
-    add(checks, "R11", (bank_name_matches_form and bank_name_matches_legal) if bank_available else None,
-        "BANK_NAME_REVIEW", "Bank account ownership",
+    holder_ready = bool(bank_available and x.bank.holder_name and v.bank_holder and v.legal_name)
+    holder_match = (norm_name(x.bank.holder_name) == norm_name(v.bank_holder)
+                    and norm_name(x.bank.holder_name) == norm_name(v.legal_name)) if holder_ready else None
+    add(checks, "R11", holder_match, "BANK_NAME_REVIEW", "Bank account ownership",
+        "Bank account ownership cannot be compared until the holder and readable proof are supplied." if holder_match is None
+        else "Bank holder matches legal business name." if holder_match else
         "The bank account holder name needs review against the business legal name and bank proof.",
         action="Review / supply bank holder evidence")
 
@@ -150,11 +196,11 @@ def checks_without_duplicate(v: VendorSubmission, x: ExtractedDocuments,
         ("GSTIN", x.gst.gstin, gst_text, norm_id),
         ("GST state", x.gst.state, gst_text, norm_name),
         ("Bank account holder", x.bank.holder_name, bank_text, norm_name),
-        ("Bank account number", x.bank.account_number, bank_text, lambda t: re.sub(r"\s+", "", t or "")),
+        ("Bank account number", x.bank.account_number, bank_text, None),
         ("Bank IFSC", x.bank.ifsc, bank_text, norm_id),
     )
     ungrounded = [label for label, value, document_text, formatter in grounding
-                  if value and formatter(value) not in formatter(document_text)]
+                  if value and not (bank_account_grounded(value, document_text) if formatter is None else formatter(value) in formatter(document_text))]
     # Keep the same R13 code for missing or unsupported evidence; do not claim verified.
     issues = [*not_found, *("not supported by PDF: " + name for name in ungrounded)]
     add(checks, "R13", not issues, "EXTRACTION_INCOMPLETE", "Evidence completeness",
@@ -171,18 +217,18 @@ def duplicate_check(v: VendorSubmission, approved_lookup: Callable[[str, str], l
     checks: list[CheckResult] = []
     gstin = norm_id(v.gstin)
     if not GSTIN_PATTERN.fullmatch(gstin):
-        ok, detail, msg = None, "GSTIN not structurally valid", "Check GSTIN before checking duplicates."
+        ok, detail, msg = None, "GSTIN not structurally valid", "Identity screening is pending until required information is valid."
     elif approved_lookup is None:
-        ok, detail, msg = None, "No persistent duplicate registry connected", "Duplicate verification is unavailable; manual review is required."
+        ok, detail, msg = None, "No persistent duplicate registry connected", "Additional identity screening is required by our review team."
     else:
         try:
             # The storage adapter must exclude this application when resubmitting.
             existing = [a for a in approved_lookup(gstin, application_id) if a != application_id]
-            ok, detail, msg = (not existing), ("Possible matching approved application: " + ", ".join(existing)) if existing else "No other approved GSTIN found", "This GSTIN may already be registered. Our team will review it."
+            ok, detail, msg = (not existing), ("Possible matching approved application: " + ", ".join(existing)) if existing else "No other approved GSTIN found", "Identity screening completed; any necessary follow-up will appear in your application status."
         except Exception:
-            ok, detail, msg = None, "Approved registry lookup failed", "Duplicate verification is temporarily unavailable. Please request review."
+            ok, detail, msg = None, "Approved registry lookup failed", "Additional identity screening is required by our review team."
     add(checks, "R12", ok, "DUPLICATE_GSTIN", "Approved GSTIN duplicate", msg, detail,
-        "Review possible duplicate")
+        "Wait for reviewer identity confirmation")
     return checks[0]
 
 
@@ -191,7 +237,7 @@ def make_decision(checks: list[CheckResult]) -> tuple[str, list[str], list[str],
     failures = [check for check in checks if check.state != CheckState.PASS]
     if not failures:
         return "APPROVED", ["All prototype document-consistency checks passed."], ["All prototype document-consistency checks passed."], "Save your tracking details."
-    priority = ["DOCUMENT_READABILITY", "PAN_GSTIN_MISMATCH", "DUPLICATE_GSTIN", "BANK_NAME_REVIEW",
+    priority = ["REQUIRED_FIELDS", "DOCUMENT_READABILITY", "PAN_FORMAT", "GSTIN_FORMAT", "IFSC_FORMAT", "PAN_GSTIN_MISMATCH", "DUPLICATE_GSTIN", "BANK_NAME_REVIEW",
                 "BANK_ACCOUNT_MISMATCH", "BANK_IFSC_MISMATCH", "GST_DOCUMENT_MISMATCH", "EXTRACTION_INCOMPLETE", "EXTRACTION_UNAVAILABLE"]
     failures.sort(key=lambda c: (priority.index(c.code) if c.code in priority else len(priority)))
     all_messages = list(dict.fromkeys(check.vendor_message for check in failures))

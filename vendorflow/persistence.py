@@ -239,7 +239,7 @@ class SupabaseRepository:
                 raise RuntimeError("No review record returned")
             return response.data[0]
         except Exception as exc:
-            raise PersistenceError("Admin decision could not be saved. Try again.") from exc
+            raise PersistenceError("Admin decision was not saved. If an approved identity already exists or the case changed, request a review. Check the case status before retrying.") from exc
 
 
 class PersistentVendorService:

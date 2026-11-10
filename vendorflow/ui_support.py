@@ -5,6 +5,7 @@ The UI never uses these to make approval decisions; the persisted Python rules d
 from __future__ import annotations
 
 from collections import Counter
+import re
 from typing import Any
 
 LABELS = {"APPROVED": "Approved", "PENDING": "Pending Review", "REJECTED": "Rejected"}
@@ -25,18 +26,30 @@ def mask_sensitive(value: Any, visible: int = 4) -> str:
     return "•" * (len(string) - visible) + string[-visible:]
 
 
-def selected_reasons(application: dict, runs: list[dict], reviews: list[dict]) -> list[str]:
+def selected_reasons(application: dict, runs: list[dict], reviews: list[dict], *, audience: str = "admin") -> list[str]:
     """Manually reviewed status is explained by the latest human action, not old AI checks."""
     if application.get("decision_source") == "MANUAL" and reviews:
         action = reviews[0].get("action", "")
         reason = reviews[0].get("reason", "")
         verb = {"APPROVE": "Approved after human review", "REJECT": "Rejected by reviewer",
                 "REQUEST_CORRECTION": "Reviewer requested correction"}.get(action, "Reviewed")
-        return [f"{verb}: {reason}"] if reason else [verb]
+        return [f"{verb}: {vendor_safe_review_reason(reason) if audience == 'vendor' else reason}"] if reason else [verb]
     if runs:
         return list(runs[0].get("reasons_json") or [])
     return ["No completed automated evaluation is available yet."]
 
+
+
+def vendor_visible_checks(checks: list[dict]) -> list[dict]:
+    """Public checks never reveal the existence of a matching registration."""
+    return [check for check in checks if check.get("rule_id") != "R12"]
+
+
+def vendor_safe_review_reason(reason: str) -> str:
+    """Never render private case identifiers from free-text admin reasons."""
+    if re.search(r"(?i)\b(duplicate|already\s+registered|prior\s+application|existing\s+vendor)\b|VF-[A-Z0-9-]{4,}", reason or ""):
+        return "Please contact the review team for details of this decision."
+    return reason
 
 def completed_counts(applications: list[dict], runs: list[dict]) -> dict[str, float | int | None]:
     status_counts = Counter(row.get("current_status") for row in applications)

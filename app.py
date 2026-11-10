@@ -24,7 +24,7 @@ from vendorflow.admin_login_guard import (
 from vendorflow.rules import GST_STATE_CODES
 from vendorflow.ui_support import (
     comparison_assessments, comparison_rows, completed_counts, display_status, mask_sensitive,
-    selected_reasons, stage_rows,
+    selected_reasons, stage_rows, vendor_visible_checks,
 )
 
 st.set_page_config(page_title="VendorFlow AI | Onboarding", page_icon="📋", layout="wide", initial_sidebar_state="collapsed")
@@ -427,7 +427,7 @@ def timeline(run: dict) -> None:
 def check_results(run: dict) -> None:
     with st.expander("All rule checks and evidence"):
         rows = []
-        for c in (run.get("checks_json") or []):
+        for c in vendor_visible_checks(run.get("checks_json") or []):
             state = c.get("state", "UNKNOWN")
             detail = "Passed — no issue found" if state == "PASS" else (c.get("vendor_message") or "Requires review")
             rows.append({"Rule": c.get("rule_id"), "Check": c.get("label"),
@@ -564,9 +564,9 @@ def new_application() -> None:
         st.code(receipt.tracking_code, language=None)
         st.caption(f"Run: {receipt.result.run_id} · {receipt.result.elapsed_ms / 1000:.2f}s · Persisted: {receipt.result.persisted}")
         with st.expander("Detailed validation checks"):
-            st.dataframe([{"Rule": c.rule_id, "Result": c.state.value, "Check": c.label,
-                           "Details": "Passed — no issue found" if c.state.value == "PASS" else c.vendor_message}
-                          for c in receipt.result.checks], hide_index=True, width="stretch")
+            st.dataframe([{"Rule": c["rule_id"], "Result": c["state"], "Check": c["label"],
+                           "Details": "Passed — no issue found" if c["state"] == "PASS" else c["vendor_message"]}
+                          for c in vendor_visible_checks([c.model_dump(mode="json") for c in receipt.result.checks])], hide_index=True, width="stretch")
         if st.button("Start another application"):
             st.session_state.pop("receipt", None)
             st.session_state.pop("new_draft", None)
@@ -699,7 +699,7 @@ def track_application() -> None:
 
     status = record["current_status"]
     st.caption(f"Application ID: {app_id}")
-    result_banner(status, selected_reasons(record, runs, reviews), source=record.get("decision_source", "AUTOMATED"))
+    result_banner(status, selected_reasons(record, runs, reviews, audience="vendor"), source=record.get("decision_source", "AUTOMATED"))
 
     # Display active administrator correction requests separately.
     if status == "PENDING" and reviews:

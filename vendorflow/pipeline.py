@@ -89,8 +89,8 @@ class ProcessingPipeline:
         lookup_event = "FAILED" if (duplicate.state.value == "UNKNOWN" and self.approved_lookup is not None) else "COMPLETED"
         if self.approved_lookup is None:
             lookup_event = "SKIPPED"
-        emit("S6", "Check approved-vendor duplicates", lookup_event,
-             "No duplicate found" if duplicate.state.value == "PASS" else "Possible duplicate / verification unavailable")
+        emit("S6", "Screen registration identity", lookup_event,
+             "Identity screening step completed" if duplicate.state.value != "UNKNOWN" else "Identity screening requires review")
 
         emit("S7", "Route policy decision", "STARTED")
         outcome, reasons, all_reasons, next_action = make_decision(checks)

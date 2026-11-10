@@ -1,7 +1,7 @@
 """Pure UI helper tests; no Streamlit server, Gemini API or Supabase access."""
 from vendorflow.ui_support import (
     completed_counts, comparison_rows, display_status,
-    mask_sensitive, selected_reasons, stage_rows,
+    mask_sensitive, selected_reasons, stage_rows, vendor_visible_checks,
 )
 
 
@@ -56,3 +56,11 @@ def test_stage_timeline_discards_start_entries_but_preserves_failure():
     assert len(timeline) == 2
     assert timeline[0]['Result'].endswith('FAILED')
     assert timeline[1]['Details'] == 'PENDING'
+
+
+def test_vendor_check_details_do_not_reveal_registry():
+    checks = [{"rule_id":"R12","admin_detail":"VF-PRIVATE"},{"rule_id":"R01","vendor_message":"Correct claim"}]
+    assert vendor_visible_checks(checks) == [checks[1]]
+    result = selected_reasons({"decision_source":"MANUAL","current_status":"PENDING"}, [],
+                [{"action":"REQUEST_CORRECTION","reason":"Duplicate registration VF-OTHER"}], audience="vendor")
+    assert "duplicate" not in str(result).lower() and "vf-other" not in str(result).lower()

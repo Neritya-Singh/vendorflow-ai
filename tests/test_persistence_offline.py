@@ -16,6 +16,7 @@ from vendorflow.persistence import (
     TerminalApplication, PersistenceError,
 )
 from tests.test_backend import OfflineTestExtractor, case
+from vendorflow.rules import norm_id
 
 
 class FakeQuery:
@@ -61,7 +62,7 @@ class FakeQuery:
             raise RuntimeError("Mock database failure")
         row = self.to_insert
         if self.name == "applications":
-            row["gstin_normalized"] = str(row["payload_json"].get("gstin") or "").strip().upper()
+            row["gstin_normalized"] = norm_id(row["payload_json"].get("gstin"))
             row.setdefault("latest_run_id", None)
         if self.name == "documents":
             assert not any(r["application_id"] == row["application_id"] and
@@ -72,14 +73,25 @@ class FakeQuery:
             assert app["current_status"] == "PENDING", "Cannot run after final decision"
             assert row["status"] != "REJECTED", "No automated rejection"
             app["payload_json"] = deepcopy(row["payload_json"])
-            app["gstin_normalized"] = row["payload_json"]["gstin"].strip().upper()
+            app["gstin_normalized"] = norm_id(row["payload_json"].get("gstin"))
+            if row["status"] == "APPROVED" and any(
+                other["id"] != app["id"] and other["current_status"] == "APPROVED"
+                and other["gstin_normalized"] == app["gstin_normalized"]
+                for other in self.db.rows["applications"]):
+                raise RuntimeError("approved GSTIN uniqueness conflict")
             app["current_status"] = row["status"]
             app["decision_source"] = "AUTOMATED"
             app["latest_run_id"] = row["id"]
         if self.name == "review_actions":
             app = next(r for r in self.db.rows["applications"] if r["id"] == row["application_id"])
             assert app["current_status"] == "PENDING"
-            app["current_status"] = {"APPROVE":"APPROVED","REJECT":"REJECTED","REQUEST_CORRECTION":"PENDING"}[row["action"]]
+            status = {"APPROVE":"APPROVED","REJECT":"REJECTED","REQUEST_CORRECTION":"PENDING"}[row["action"]]
+            if status == "APPROVED" and any(
+                other["id"] != app["id"] and other["current_status"] == "APPROVED"
+                and other["gstin_normalized"] == app["gstin_normalized"]
+                for other in self.db.rows["applications"]):
+                raise RuntimeError("approved GSTIN uniqueness conflict")
+            app["current_status"] = status
             app["decision_source"] = "MANUAL"
         self.db.rows[self.name].append(row)
         return SimpleNamespace(data=[deepcopy(row)])

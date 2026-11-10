@@ -7,13 +7,14 @@ create extension if not exists pgcrypto;
 create table if not exists public.applications (
     id text primary key,
     payload_json jsonb not null default '{}'::jsonb,
-    gstin_normalized text generated always as (upper(btrim(coalesce(payload_json->>'gstin', '')))) stored,
+    gstin_normalized text generated always as (upper(regexp_replace(coalesce(payload_json->>'gstin',''), '[[:space:]]+', '', 'g'))) stored,
     tracking_token_hash text not null,
     current_status text not null default 'PENDING'
         check (current_status in ('APPROVED','PENDING','REJECTED')),
     decision_source text not null default 'AUTOMATED'
         check (decision_source in ('AUTOMATED','MANUAL')),
     latest_run_id text,
+    constraint approved_gstin_valid_format check (current_status <> 'APPROVED' or gstin_normalized ~ '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$'),
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
@@ -59,6 +60,7 @@ create table if not exists public.review_actions (
     created_at timestamptz not null default now()
 );
 
+create unique index if not exists uq_vendorflow_approved_gstin on public.applications (gstin_normalized) where current_status='APPROVED';
 create index if not exists idx_apps_status_gstin on public.applications (current_status,gstin_normalized);
 create index if not exists idx_docs_application on public.documents (application_id,doc_type,version desc);
 create index if not exists idx_runs_application on public.runs (application_id,started_at desc);
