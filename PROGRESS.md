@@ -42,3 +42,33 @@ Download and merge Stage 3.4 frontend add-on into user's existing project, insta
 | 6.5 Production release | ⚪ Not started | Controlled deployment, real browser acceptance, video and documentation |
 
 All Stage 6.3 code is intended for `stage6-v1.1-remediation` only. Production remains unchanged until Stage 6.5. See `STAGE6_3_HANDOFF.md`.
+
+
+## Stage 6.3 final checkpoint (2026-11-11)
+
+- 101/101 tests passed including the local navigation/configuration hotfix.
+- Owner checked most vendor/admin browser changes and accepted UX; not all browser
+  journeys were exhaustively verified.
+- Development-only GitHub commit `9883f09` verified; main unchanged.
+
+## Stage 6.4 development checkpoint (2026-11-11)
+
+- Gemini adapter: at most 3 total attempts, SDK internal retry disabled (one
+  SDK attempt per adapter call), per-request 18s HTTP timeout and 60s nominal
+  total budget, with bounded exponential backoff and numeric Retry-After guard.
+- Only 408, 429, 5xx and typed network/timeout errors retry. 400/401/403/404,
+  unexpected exceptions and invalid/empty JSON fail immediately.
+- Every final Gemini failure routes Pending Review; no plausible fields supplied
+  by the model can override deterministic grounding.
+- Sanitized S3 stage diagnostics include category/model/attempts/elapsed_ms but
+  never provider raw errors, raw document text or secrets.
+- PDF reader caps extractable text at 24,000 characters per document; scanned
+  or unsupported evidence remains pending. High-confidence reversed GST/bank
+  uploads explain the correction and skip the Gemini request.
+- **128/128 offline tests passed** (101 previous + 27 new). No database schema
+  migrations, no production writes or GitHub pushes in this package.
+- **Next gate:** apply patch to development branch, 128 tests locally, run one
+  read-only real Gemini synthetic fixture smoke. Verify staging remains isolated
+  and user commits *only* Stage 6.4 paths after passing.
+- Claude-led comprehensive SaaS visual refinement is deliberately postponed
+  until after Stage 6.4 and before Stage 6.5 production release.

@@ -1,6 +1,6 @@
 # VendorFlow AI — Zamp AI / PS-2 Vendor Onboarding
 
-**v1.1 development copy — Stage 6.3 UX changes prepared, not released.**
+**v1.1 development copy — Stage 6.4 Gemini resilience prepared, not released.**
 
 This checkout is intended for `stage6-v1.1-remediation` and the isolated
 `vendorflow-v11-staging` Supabase project. The production MVP remains on GitHub
@@ -12,7 +12,9 @@ An India-only, GST-registered vendor onboarding demo with:
 
 - A three-step vendor application with GST and bank PDFs; recovery ID + private code issued before the first save.
 - A document-consistency decision: **Approved, Pending Review or Rejected**, with plain-language reasons and tracked next actions.
-- AI-assisted PDF extraction; deterministic PAN/GSTIN/IFSC, evidence-grounding, and approved-GSTIN duplicate rules.
+- AI-assisted PDF extraction with 3-attempt maximum for transient API errors,
+  sanitized diagnostics and no automatic model fallback; deterministic PAN/GSTIN/IFSC,
+  PDF evidence-grounding and approved-GSTIN duplicate rules.
 - Staff exception queue, masked submitted-vs-PDF comparison, authenticated run-bound PDF downloads, revision-safe manual review, and an audit trail.
 - Real persisted workflow stages and processing time. These metrics are **not** a measured reduction in vendor waiting time.
 
@@ -33,9 +35,15 @@ PYTHONPATH=. python -m pytest -q
 streamlit run app.py
 ```
 
-The Stage 6.3 offline suite is **99/99 passing**. The UI still requires a real
-staging desktop/mobile browser acceptance pass before Stage 6.3 is declared done.
-See [`STAGE6_3_HANDOFF.md`](STAGE6_3_HANDOFF.md) for the exact review checklist.
+The Stage 6.4 local suite is **128/128 passing** (101 Stage 6.3/hotfix checks
+plus 27 new bounded-retry / PDF diagnostics tests). Stage 6.3 was committed to
+the development branch as `9883f09`; browser acceptance was reviewed by the
+project owner but not all journeys were exhaustively checked.
+
+Use `python scripts/stage6_4_live_gemini_smoke.py` for the **optional single
+synthetic fixture API gate** (real quota/charges may apply), only with the
+local *staging* `.env` and after running offline tests. This does **not** write
+to Supabase. See [`STAGE6_4_HANDOFF.md`](STAGE6_4_HANDOFF.md).
 
 ## Environment safeguards
 

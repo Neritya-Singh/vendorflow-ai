@@ -92,7 +92,8 @@ def add(checks: list[CheckResult], rule: str, ok: bool | None, code: str,
 
 def checks_without_duplicate(v: VendorSubmission, x: ExtractedDocuments,
                              gst_pdf: ReadPDF | None, bank_pdf: ReadPDF | None,
-                             extraction_error: bool) -> list[CheckResult]:
+                             extraction_error: bool, *,
+                             swapped_documents: bool = False) -> list[CheckResult]:
     checks: list[CheckResult] = []
     missing = [label for label, value in (
         ("Legal business name", v.legal_name), ("Business state", v.business_state),
@@ -112,9 +113,11 @@ def checks_without_duplicate(v: VendorSubmission, x: ExtractedDocuments,
 
     missing_docs = [label for label, pdf in (("GST certificate", gst_pdf), ("Bank proof", bank_pdf)) if pdf is None]
     unreadable_docs = [label for label, pdf in (("GST certificate", gst_pdf), ("Bank proof", bank_pdf)) if pdf is not None and not pdf.readable]
-    document_good = not missing_docs and not unreadable_docs
+    document_good = not missing_docs and not unreadable_docs and not swapped_documents
     doc_msg = ("Upload: " + ", ".join(missing_docs) + ".") if missing_docs else (
         "Replace unreadable document(s): " + ", ".join(unreadable_docs) + "." if unreadable_docs
+        else "The GST certificate and bank proof appear to be uploaded in the opposite slots. "
+             "Swap the PDFs and resubmit." if swapped_documents
         else "Both required PDFs contain readable text.")
     add(checks, "R02", document_good, "DOCUMENT_READABILITY", "Required PDFs", doc_msg,
         action="Upload / replace the named PDF")
@@ -206,8 +209,12 @@ def checks_without_duplicate(v: VendorSubmission, x: ExtractedDocuments,
     add(checks, "R13", not issues, "EXTRACTION_INCOMPLETE", "Evidence completeness",
         "Missing or unconfirmed document evidence: " + ", ".join(issues) + "." if issues else "All critical extracted fields occur in the source documents.",
         action="Upload clearer/more complete documents")
-    add(checks, "R14", not extraction_error, "EXTRACTION_UNAVAILABLE", "AI extraction",
-        "AI extraction was unavailable. Try again or request manual review." if extraction_error else "Extraction completed without error.",
+    add(checks, "R14", not extraction_error and not swapped_documents,
+        "EXTRACTION_UNAVAILABLE", "AI extraction",
+        "The uploaded PDFs appear reversed. Swap the document slots and retry."
+        if swapped_documents else
+        "AI extraction was unavailable. Try again or request manual review."
+        if extraction_error else "Extraction completed without error.",
         action="Retry / request review")
     return checks
 
