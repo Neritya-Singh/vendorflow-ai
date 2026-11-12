@@ -32,6 +32,25 @@ class TerminalApplication(PersistenceError):
     pass
 
 
+class StaleRevision(PersistenceError):
+    """A newer run or reviewer action has superseded the displayed revision."""
+
+
+@dataclass(frozen=True)
+class PreparedIntake:
+    application_id: str
+    tracking_code: str
+
+
+def prepare_intake() -> PreparedIntake:
+    """Issue recoverable credentials BEFORE the first durable database write.
+
+    The caller must display/save these privately before executing submit().
+    Retrying with this same pair is idempotent at the application level.
+    """
+    return PreparedIntake("VF-" + uuid4().hex[:12].upper(), secrets.token_urlsafe(24))
+
+
 @dataclass
 class ApplicationReceipt:
     application_id: str
@@ -62,11 +81,14 @@ class SupabaseRepository:
         except Exception as exc:
             raise PersistenceError("Could not connect to Supabase. Check server configuration.") from exc
 
-    def create_application(self, vendor: VendorSubmission) -> tuple[str, str]:
+    def create_application(self, vendor: VendorSubmission,
+                           prepared: PreparedIntake | None = None) -> tuple[str, str]:
         if not vendor.legal_name.strip() or not vendor.contact_email.strip():
             raise MinimumIntakeError("Legal business name and contact email are required.")
-        application_id = "VF-" + uuid4().hex[:12].upper()
-        token = secrets.token_urlsafe(24)
+        issued = prepared or prepare_intake()
+        application_id, token = issued.application_id, issued.tracking_code
+        if not (application_id.startswith("VF-") and len(application_id) == 15 and len(token) >= 20):
+            raise PersistenceError("Invalid tracking credentials. Begin a new submission.")
         data = {
             "id": application_id,
             "payload_json": vendor.model_dump(),
@@ -76,9 +98,17 @@ class SupabaseRepository:
         try:
             response = self.client.table("applications").insert(data).execute()
             if not response.data:
-                raise PersistenceError("Application record was not confirmed by database.")
+                raise RuntimeError("Application creation was not acknowledged")
         except Exception as exc:
-            raise PersistenceError("Could not create application. Please retry.") from exc
+            # Network acknowledgment may be lost AFTER the insert commits. Check
+            # ownership using the same secret; never generate another ID on retry.
+            try:
+                self.authenticate_vendor(application_id, token)
+            except UnauthorizedTracking:
+                raise PersistenceError(
+                    "Application creation could not be confirmed. Retain the ID and tracking code "
+                    "and retry with these same credentials."
+                ) from exc
         return application_id, token
 
     def _application(self, application_id: str) -> dict:
@@ -119,21 +149,35 @@ class SupabaseRepository:
                     .limit(1).execute())
         return response.data[0] if response.data else None
 
+    def _document_by_id(self, document_id: str) -> dict:
+        response = (self.client.table("documents").select("*")
+                    .eq("id", document_id).limit(1).execute())
+        if not response.data:
+            raise PersistenceError("Referenced PDF version is no longer available.")
+        return response.data[0]
+
+    @staticmethod
+    def _manifest_entry(row: dict) -> dict:
+        return {key: row[key] for key in (
+            "id", "doc_type", "version", "file_sha256", "storage_path"
+        )}
+
     def upload_document(self, application_id: str, doc_type: str, uploaded: PDFInput) -> dict:
         if doc_type not in ("GST", "BANK"):
             raise ValueError("Unknown PDF document type")
-        # Blocks non-PDF and oversized uploads. Unreadable PDFs can be submitted for PENDING.
         read_pdf(uploaded)
         old = self._latest_document_row(application_id, doc_type)
         version = int(old["version"]) + 1 if old else 1
         sha = hashlib.sha256(uploaded.content).hexdigest()
         path = f"{application_id}/{doc_type}/v{version}-{uuid4().hex}.pdf"
+        stored = False
         try:
             self.client.storage.from_(self.BUCKET).upload(
                 path=path,
                 file=uploaded.content,
                 file_options={"content-type": "application/pdf", "upsert": "false"},
             )
+            stored = True
             row = {
                 "application_id": application_id,
                 "doc_type": doc_type,
@@ -147,13 +191,26 @@ class SupabaseRepository:
                 raise RuntimeError("No confirmed document metadata row")
             return response.data[0]
         except Exception as exc:
-            # The private object may be orphaned after DB failure; no approval is claimed.
-            raise PersistenceError("PDF upload or metadata save failed. No decision was saved.") from exc
+            if stored:
+                # An insert may have COMMITTED although its acknowledgement was lost.
+                # Check for its immutable metadata before compensating storage.
+                try:
+                    confirmed = (self.client.table("documents").select("*")
+                                 .eq("storage_path", path).limit(1).execute().data)
+                    if confirmed and confirmed[0]["file_sha256"] == sha:
+                        return confirmed[0]
+                except Exception:
+                    pass
+                try:
+                    self.client.storage.from_(self.BUCKET).remove([path])
+                except Exception:
+                    pass
+            raise PersistenceError(
+                "PDF upload or metadata save failed. No decision was saved. "
+                "Use your existing tracking credentials to retry."
+            ) from exc
 
-    def load_latest_document(self, application_id: str, doc_type: str) -> PDFInput | None:
-        row = self._latest_document_row(application_id, doc_type)
-        if not row:
-            return None
+    def _download_verified(self, row: dict) -> PDFInput:
         try:
             content = self.client.storage.from_(self.BUCKET).download(row["storage_path"])
             if not isinstance(content, bytes):
@@ -162,10 +219,86 @@ class SupabaseRepository:
                 raise PersistenceError("Stored PDF integrity check failed.")
             return PDFInput(row["filename"], content)
         except Exception as exc:
-            raise PersistenceError("Could not retrieve a stored PDF. No decision was issued.") from exc
+            raise PersistenceError("Could not retrieve a verified stored PDF. No decision was issued.") from exc
+
+    def load_committed_document(self, application_id: str, doc_type: str) -> tuple[PDFInput | None, dict | None]:
+        """Only reuse a PDF referenced by the latest COMMITTED run manifest.
+
+        Uploaded metadata not linked to a committed run is STAGED, never active.
+        Historical runs retain immutable IDs, versions, paths and checksums.
+        """
+        app = self._application(application_id)
+        run_id = app.get("latest_run_id")
+        if not run_id:
+            return None, None
+        response = (self.client.table("runs").select("id,document_manifest")
+                    .eq("id", run_id).eq("application_id", application_id)
+                    .limit(1).execute())
+        if not response.data:
+            raise PersistenceError("Committed workflow evidence could not be located.")
+        matches = [d for d in (response.data[0].get("document_manifest") or [])
+                   if d.get("doc_type") == doc_type]
+        if not matches:
+            return None, None
+        if len(matches) != 1:
+            raise PersistenceError("Committed workflow evidence is inconsistent.")
+        entry = matches[0]
+        row = self._document_by_id(str(entry["id"]))
+        if row["application_id"] != application_id or any(
+            row[k] != entry[k] for k in ("doc_type", "version", "file_sha256", "storage_path")
+        ):
+            raise PersistenceError("Stored PDF version does not match the committed run.")
+        return self._download_verified(row), row
+
+    def load_latest_document(self, application_id: str, doc_type: str) -> PDFInput | None:
+        """Backward-compatible API name; returns latest COMMITTED, never staged."""
+        pdf, _ = self.load_committed_document(application_id, doc_type)
+        return pdf
+
+    def load_run_document(self, application_id: str, run_id: str, doc_type: str) -> PDFInput | None:
+        """Read specific historical evidence after staff/vendor authorization."""
+        resp = (self.client.table("runs").select("id,document_manifest")
+                .eq("id", run_id).eq("application_id", application_id).limit(1).execute())
+        if not resp.data:
+            raise PersistenceError("Requested workflow run does not exist.")
+        entries = [d for d in resp.data[0].get("document_manifest") or []
+                   if d.get("doc_type") == doc_type]
+        if not entries:
+            return None
+        if len(entries) != 1:
+            raise PersistenceError("Historical PDF references are inconsistent.")
+        row = self._document_by_id(str(entries[0]["id"]))
+        if row["application_id"] != application_id or any(
+            row[k] != entries[0][k] for k in ("doc_type", "version", "file_sha256", "storage_path")
+        ):
+            raise PersistenceError("Historical PDF does not match its recorded version.")
+        return self._download_verified(row)
+
+    def saved_result(self, application_id: str) -> WorkflowResult | None:
+        """Recover a lost submit response without repeating the workflow."""
+        app = self._application(application_id)
+        if not app.get("latest_run_id"):
+            return None
+        response = (self.client.table("runs").select("*")
+                    .eq("id", app["latest_run_id"]).limit(1).execute())
+        if not response.data:
+            raise PersistenceError("Saved workflow run could not be recovered.")
+        row = response.data[0]
+        return WorkflowResult.model_validate({
+            "application_id": application_id, "run_id": row["id"],
+            "trigger": row["trigger"], "status": row["status"],
+            "reasons": row["reasons_json"], "all_reasons": row["all_reasons_json"],
+            "next_action": row["next_action"], "checks": row["checks_json"],
+            "extracted": row["extracted_json"], "stage_events": row["stages_json"],
+            "started_at": row["started_at"], "finished_at": row["finished_at"],
+            "elapsed_ms": row["elapsed_ms"], "persisted": True,
+            "extraction_error": row.get("extraction_error", False),
+        })
 
     def commit_run(self, result: WorkflowResult, vendor: VendorSubmission,
-                   *, stage_callback: StageCallback | None = None) -> WorkflowResult:
+                   *, expected_revision: int | None = None,
+                   document_manifest: list[dict] | None = None,
+                   stage_callback: StageCallback | None = None) -> WorkflowResult:
         """Inserting a run fires an SQL trigger that updates the application atomically."""
         started = StageEvent(stage_id="S9", label="Persist application and run", event="STARTED")
         if stage_callback:
@@ -174,7 +307,11 @@ class SupabaseRepository:
                                note="Run, decision and application status saved")
         stages = [e for e in result.stage_events if e.stage_id != "S9"] + [started, completed]
         timestamp = datetime.now(timezone.utc)
+        if expected_revision is None:
+            expected_revision = int(self._application(result.application_id).get("revision", 0))
         run_record = {
+            "expected_revision": expected_revision,
+            "document_manifest": document_manifest or [],
             "id": result.run_id,
             "application_id": result.application_id,
             "trigger": result.trigger,
@@ -200,7 +337,10 @@ class SupabaseRepository:
             if stage_callback:
                 stage_callback(StageEvent(stage_id="S9", label="Persist application and run", event="FAILED",
                                           note="Database save failed; no saved decision claimed"))
-            raise PersistenceError("Database save failed. Decision not confirmed; please retry.") from exc
+            raise PersistenceError(
+                "Database save was not acknowledged or the application changed. "
+                "Check tracking with the existing ID and code before retrying."
+            ) from exc
         if stage_callback:
             stage_callback(completed)
         return result.model_copy(update={"persisted": True, "stage_events": stages,
@@ -219,27 +359,42 @@ class SupabaseRepository:
         return response.data
 
     def admin_queue(self, status: str = "PENDING") -> list[dict]:
-        query = self.client.table("applications").select("id,payload_json,current_status,decision_source,latest_run_id,created_at,updated_at")
+        query = self.client.table("applications").select("id,payload_json,current_status,decision_source,latest_run_id,revision,created_at,updated_at")
         if status != "ALL":
             query = query.eq("current_status", status)
         return query.order("created_at", desc=False).execute().data
 
-    def admin_review(self, application_id: str, action: str, reason: str) -> dict:
+    def admin_review(self, application_id: str, action: str, reason: str,
+                     *, expected_latest_run_id: str | None = None,
+                     expected_revision: int | None = None) -> dict:
         if action not in ("APPROVE", "REQUEST_CORRECTION", "REJECT"):
             raise ValueError("Unknown admin action")
         if len(reason.strip()) < 3:
             raise ValueError("A specific review reason is required.")
-        # SQL trigger only permits review actions against PENDING applications.
+        app = self._application(application_id)
+        reviewed_run_id = app.get("latest_run_id")
+        if not reviewed_run_id or app.get("current_status") != "PENDING":
+            raise TerminalApplication("Only completed pending applications can be reviewed.")
+        if expected_latest_run_id is not None and expected_latest_run_id != reviewed_run_id:
+            raise StaleRevision("This application changed. Refresh before reviewing it.")
+        observed_revision = int(app.get("revision", 0))
+        if expected_revision is not None and expected_revision != observed_revision:
+            raise StaleRevision("This application changed. Refresh before reviewing it.")
         try:
             response = self.client.table("review_actions").insert({
                 "application_id": application_id, "action": action,
-                "reason": reason.strip(), "actor": "demo-admin"
+                "reason": reason.strip(), "actor": "demo-admin",
+                "reviewed_run_id": reviewed_run_id,
+                "expected_revision": observed_revision,
             }).execute()
             if not response.data:
                 raise RuntimeError("No review record returned")
             return response.data[0]
         except Exception as exc:
-            raise PersistenceError("Admin decision could not be saved. Try again.") from exc
+            raise PersistenceError(
+                "Admin decision was not saved. The case may have changed or a "
+                "conflicting approved identity exists. Refresh before retrying."
+            ) from exc
 
 
 class PersistentVendorService:
@@ -249,22 +404,45 @@ class PersistentVendorService:
         self.extractor = extractor
 
     def submit(self, vendor: VendorSubmission, gst_upload: PDFInput | None,
-               bank_upload: PDFInput | None, stage_callback: StageCallback | None = None) -> ApplicationReceipt:
-        # Validate PDF headers/types/sizes before writing any application record.
+               bank_upload: PDFInput | None, stage_callback: StageCallback | None = None,
+               *, prepared: PreparedIntake | None = None) -> ApplicationReceipt:
         if gst_upload is not None:
             read_pdf(gst_upload)
         if bank_upload is not None:
             read_pdf(bank_upload)
-        application_id, token = self.repo.create_application(vendor)
+        application_id, token = self.repo.create_application(vendor, prepared=prepared)
+        # A lost HTTP/Streamlit acknowledgement is not a reason to create another
+        # application. Return the previously committed receipt, unchanged.
+        already_saved = self.repo.saved_result(application_id)
+        if already_saved is not None:
+            return ApplicationReceipt(application_id, token, already_saved)
+        manifest: list[dict] = []
         if gst_upload:
-            self.repo.upload_document(application_id, "GST", gst_upload)
+            manifest.append(self.repo._manifest_entry(self.repo.upload_document(application_id, "GST", gst_upload)))
         if bank_upload:
-            self.repo.upload_document(application_id, "BANK", bank_upload)
+            manifest.append(self.repo._manifest_entry(self.repo.upload_document(application_id, "BANK", bank_upload)))
         engine = ProcessingPipeline(self.extractor, approved_lookup=self.repo.approved_lookup)
         result = engine.evaluate(vendor, gst_upload, bank_upload, application_id=application_id,
                                  stage_callback=stage_callback, persistence_planned=True)
-        result = self.repo.commit_run(result, vendor, stage_callback=stage_callback)
+        try:
+            result = self.repo.commit_run(result, vendor, expected_revision=0,
+                                          document_manifest=manifest, stage_callback=stage_callback)
+        except PersistenceError:
+            # When DB committed but network lost the reply, recover the run.
+            saved = self.repo.saved_result(application_id)
+            if saved is None:
+                raise
+            result = saved
         return ApplicationReceipt(application_id, token, result)
+
+    def resume_submission(self, application_id: str, tracking_code: str,
+                          vendor: VendorSubmission, gst_upload: PDFInput | None = None,
+                          bank_upload: PDFInput | None = None,
+                          stage_callback: StageCallback | None = None) -> ApplicationReceipt:
+        """Explicit recovery path for a session/browser restart during first save."""
+        self.repo.authenticate_vendor(application_id, tracking_code)
+        return self.submit(vendor, gst_upload, bank_upload, stage_callback,
+                           prepared=PreparedIntake(application_id, tracking_code))
 
     def track(self, application_id: str, tracking_code: str) -> tuple[dict, list[dict]]:
         record = self.repo.authenticate_vendor(application_id, tracking_code)
@@ -273,26 +451,47 @@ class PersistentVendorService:
 
     def resubmit(self, application_id: str, tracking_code: str, vendor: VendorSubmission,
                  gst_upload: PDFInput | None = None, bank_upload: PDFInput | None = None,
-                 stage_callback: StageCallback | None = None) -> WorkflowResult:
+                 stage_callback: StageCallback | None = None,
+                 *, expected_latest_run_id: str | None = None,
+                 expected_revision: int | None = None) -> WorkflowResult:
         old = self.repo.authenticate_vendor(application_id, tracking_code)
         if old["current_status"] != Status.PENDING.value or not old.get("latest_run_id"):
             raise TerminalApplication("Only completed pending applications can be corrected and resubmitted.")
+        if expected_latest_run_id is not None and old["latest_run_id"] != expected_latest_run_id:
+            raise StaleRevision("A newer revision exists. Refresh your application before resubmitting.")
+        revision = int(old.get("revision", 0))
+        if expected_revision is not None and revision != expected_revision:
+            raise StaleRevision("A newer revision exists. Refresh your application before resubmitting.")
         if not vendor.legal_name.strip() or not vendor.contact_email.strip():
             raise MinimumIntakeError("Legal name and contact email are required.")
         if gst_upload is not None:
             read_pdf(gst_upload)
         if bank_upload is not None:
             read_pdf(bank_upload)
+        manifest = []
         if gst_upload:
-            self.repo.upload_document(application_id, "GST", gst_upload)
+            gst_row = self.repo.upload_document(application_id, "GST", gst_upload)
         else:
-            gst_upload = self.repo.load_latest_document(application_id, "GST")
+            gst_upload, gst_row = self.repo.load_committed_document(application_id, "GST")
+        if gst_row:
+            manifest.append(self.repo._manifest_entry(gst_row))
         if bank_upload:
-            self.repo.upload_document(application_id, "BANK", bank_upload)
+            bank_row = self.repo.upload_document(application_id, "BANK", bank_upload)
         else:
-            bank_upload = self.repo.load_latest_document(application_id, "BANK")
+            bank_upload, bank_row = self.repo.load_committed_document(application_id, "BANK")
+        if bank_row:
+            manifest.append(self.repo._manifest_entry(bank_row))
         engine = ProcessingPipeline(self.extractor, approved_lookup=self.repo.approved_lookup)
         result = engine.evaluate(vendor, gst_upload, bank_upload, application_id=application_id,
                                  trigger="resubmission", stage_callback=stage_callback,
                                  persistence_planned=True)
-        return self.repo.commit_run(result, vendor, stage_callback=stage_callback)
+        try:
+            return self.repo.commit_run(result, vendor, expected_revision=revision,
+                                        document_manifest=manifest, stage_callback=stage_callback)
+        except PersistenceError:
+            # A saved revision may be committed even when the HTTP response is lost.
+            # Recover ONLY our own exact run; never misreport a competing submission.
+            latest = self.repo.saved_result(application_id)
+            if latest is not None and latest.run_id == result.run_id:
+                return latest
+            raise

@@ -20,3 +20,55 @@ Download and merge Stage 3.4 frontend add-on into user's existing project, insta
 - All data are synthetic; Approved is document-consistency policy, not legal/GST/bank verification.
 - Public demo must not use real financial documents.
 - Existing API keys and tracking codes should never be pasted into chat.
+
+
+## Stage 6.2 — Staging-only development update (2026-11-10)
+
+- Code implemented locally: revision CAS, run-linked source-PDF manifests, immutable PDF metadata, recoverable initial receipt/idempotent retry, and lost run-ack recovery.
+- Full offline suite: **82/82 passing**. Includes all Stage 6.1 regressions and the four previously RED Stage 6.2 tests.
+- Staging migration `stage6_2_revision_provenance_recovery` applied; read-only checks show all four tables empty and new columns/trigger present.
+- **Subsequently verified:** 13/13 PostgreSQL smoke scenarios, the two-connection concurrency gate and actual staging Storage/recovery smoke tests passed; all test data and Storage objects were cleaned up.
+- **Committed on development branch:** `4c87f52`. Production GitHub `main`, database and Streamlit deployment remain unchanged.
+
+## Stage 6 status as of 2026-11-11 (the Phase 3 table above is historical)
+
+| Stage | Current state | Evidence / remaining gate |
+| --- | --- | --- |
+| 6.0 Safe baseline | ✅ Completed | Isolated branch and staging; baseline tests, reproducible red regressions and live PostgreSQL baselines |
+| 6.1 Decision engine | ✅ Completed | 61 targeted tests; 4/4 SQL; real unique-GSTIN race blocked; commit `9c6bcd7` |
+| 6.2 Reliability | ✅ Completed for scoped scenarios | 82/82 tests; 13/13 SQL; real concurrency and Storage/recovery smoke pass; commit `4c87f52`; sudden process kill not induced |
+| 6.3 UX / reviewer workflow | 🟡 **Code ready; browser gate pending** | 99/99 offline tests; vendor landing, single receipt, authoritative correction rerun, owner/issue/age queue, run-bound private PDF download. Manual desktop/mobile staging journey still required |
+| 6.4 Gemini resilience | ⚪ Not started | Bounded retries and truthful technical-error messaging |
+| 6.5 Production release | ⚪ Not started | Controlled deployment, real browser acceptance, video and documentation |
+
+All Stage 6.3 code is intended for `stage6-v1.1-remediation` only. Production remains unchanged until Stage 6.5. See `STAGE6_3_HANDOFF.md`.
+
+
+## Stage 6.3 final checkpoint (2026-11-11)
+
+- 101/101 tests passed including the local navigation/configuration hotfix.
+- Owner checked most vendor/admin browser changes and accepted UX; not all browser
+  journeys were exhaustively verified.
+- Development-only GitHub commit `9883f09` verified; main unchanged.
+
+## Stage 6.4 development checkpoint (2026-11-11)
+
+- Gemini adapter: at most 3 total attempts, SDK internal retry disabled (one
+  SDK attempt per adapter call), per-request 18s HTTP timeout and 60s nominal
+  total budget, with bounded exponential backoff and numeric Retry-After guard.
+- Only 408, 429, 5xx and typed network/timeout errors retry. 400/401/403/404,
+  unexpected exceptions and invalid/empty JSON fail immediately.
+- Every final Gemini failure routes Pending Review; no plausible fields supplied
+  by the model can override deterministic grounding.
+- Sanitized S3 stage diagnostics include category/model/attempts/elapsed_ms but
+  never provider raw errors, raw document text or secrets.
+- PDF reader caps extractable text at 24,000 characters per document; scanned
+  or unsupported evidence remains pending. High-confidence reversed GST/bank
+  uploads explain the correction and skip the Gemini request.
+- **128/128 offline tests passed** (101 previous + 27 new). No database schema
+  migrations, no production writes or GitHub pushes in this package.
+- **Next gate:** apply patch to development branch, 128 tests locally, run one
+  read-only real Gemini synthetic fixture smoke. Verify staging remains isolated
+  and user commits *only* Stage 6.4 paths after passing.
+- Claude-led comprehensive SaaS visual refinement is deliberately postponed
+  until after Stage 6.4 and before Stage 6.5 production release.

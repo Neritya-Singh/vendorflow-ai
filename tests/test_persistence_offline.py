@@ -7,6 +7,7 @@ from __future__ import annotations
 from copy import deepcopy
 from types import SimpleNamespace
 from pathlib import Path
+from uuid import uuid4
 import pytest
 
 from vendorflow.models import Status, VendorSubmission
@@ -16,6 +17,7 @@ from vendorflow.persistence import (
     TerminalApplication, PersistenceError,
 )
 from tests.test_backend import OfflineTestExtractor, case
+from vendorflow.rules import norm_id
 
 
 class FakeQuery:
@@ -60,10 +62,14 @@ class FakeQuery:
         if self.db.fail_table == self.name:
             raise RuntimeError("Mock database failure")
         row = self.to_insert
+        if self.name == "applications" and any(r["id"] == row["id"] for r in self.db.rows["applications"]):
+            raise RuntimeError("Duplicate application identifier")
         if self.name == "applications":
-            row["gstin_normalized"] = str(row["payload_json"].get("gstin") or "").strip().upper()
+            row["gstin_normalized"] = norm_id(row["payload_json"].get("gstin"))
             row.setdefault("latest_run_id", None)
+            row.setdefault("revision", 0)
         if self.name == "documents":
+            row.setdefault("id", str(uuid4()))
             assert not any(r["application_id"] == row["application_id"] and
                            r["doc_type"] == row["doc_type"] and r["version"] == row["version"]
                            for r in self.db.rows["documents"])
@@ -71,17 +77,53 @@ class FakeQuery:
             app = next(r for r in self.db.rows["applications"] if r["id"] == row["application_id"])
             assert app["current_status"] == "PENDING", "Cannot run after final decision"
             assert row["status"] != "REJECTED", "No automated rejection"
+            if row["expected_revision"] != app["revision"]:
+                raise RuntimeError("stale_revision: application changed")
+            if row["trigger"] == "submission" and app["latest_run_id"] is not None:
+                raise RuntimeError("Initial submission already exists")
+            if row["trigger"] == "resubmission" and app["latest_run_id"] is None:
+                raise RuntimeError("Cannot resubmit without initial run")
+            manifest = row["document_manifest"]
+            if len({d["doc_type"] for d in manifest}) != len(manifest):
+                raise RuntimeError("Duplicate source-document type")
+            for d in manifest:
+                candidates = [document for document in self.db.rows["documents"] if
+                    document["id"] == d["id"] and
+                    document["application_id"] == row["application_id"] and
+                    all(document.get(k) == d.get(k) for k in
+                        ("doc_type", "version", "file_sha256", "storage_path"))]
+                if len(candidates) != 1:
+                    raise RuntimeError("Source-document manifest mismatch")
+            if row["status"] == "APPROVED" and {d["doc_type"] for d in manifest} != {"GST", "BANK"}:
+                raise RuntimeError("Automatic approval requires both PDFs")
             app["payload_json"] = deepcopy(row["payload_json"])
-            app["gstin_normalized"] = row["payload_json"]["gstin"].strip().upper()
+            app["gstin_normalized"] = norm_id(row["payload_json"].get("gstin"))
+            if row["status"] == "APPROVED" and any(
+                other["id"] != app["id"] and other["current_status"] == "APPROVED"
+                and other["gstin_normalized"] == app["gstin_normalized"]
+                for other in self.db.rows["applications"]):
+                raise RuntimeError("approved GSTIN uniqueness conflict")
             app["current_status"] = row["status"]
             app["decision_source"] = "AUTOMATED"
             app["latest_run_id"] = row["id"]
+            app["revision"] += 1
         if self.name == "review_actions":
             app = next(r for r in self.db.rows["applications"] if r["id"] == row["application_id"])
             assert app["current_status"] == "PENDING"
-            app["current_status"] = {"APPROVE":"APPROVED","REJECT":"REJECTED","REQUEST_CORRECTION":"PENDING"}[row["action"]]
+            if row["expected_revision"] != app["revision"] or row["reviewed_run_id"] != app["latest_run_id"]:
+                raise RuntimeError("stale_revision: reviewed evidence changed")
+            status = {"APPROVE":"APPROVED","REJECT":"REJECTED","REQUEST_CORRECTION":"PENDING"}[row["action"]]
+            if status == "APPROVED" and any(
+                other["id"] != app["id"] and other["current_status"] == "APPROVED"
+                and other["gstin_normalized"] == app["gstin_normalized"]
+                for other in self.db.rows["applications"]):
+                raise RuntimeError("approved GSTIN uniqueness conflict")
+            app["current_status"] = status
             app["decision_source"] = "MANUAL"
+            app["revision"] += 1
         self.db.rows[self.name].append(row)
+        if self.db.lost_ack_table == self.name:
+            raise RuntimeError("Synthetic lost acknowledgment after database commit")
         return SimpleNamespace(data=[deepcopy(row)])
 
 
@@ -95,6 +137,10 @@ class FakeBucket:
         return SimpleNamespace(path=path)
 
     def download(self, path): return self.storage.files[path]
+
+    def remove(self, paths):
+        for path in paths:
+            self.storage.files.pop(path, None)
 
 
 class FakeStorage:
@@ -110,6 +156,7 @@ class FakeSupabase:
         self.rows = {name: [] for name in ("applications", "documents", "runs", "review_actions")}
         self.storage = FakeStorage()
         self.fail_table = None
+        self.lost_ack_table = None
 
     def table(self, name): return FakeQuery(self, name)
 

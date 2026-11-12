@@ -5,6 +5,7 @@ The UI never uses these to make approval decisions; the persisted Python rules d
 from __future__ import annotations
 
 from collections import Counter
+import re
 from typing import Any
 
 LABELS = {"APPROVED": "Approved", "PENDING": "Pending Review", "REJECTED": "Rejected"}
@@ -12,7 +13,7 @@ ICONS = {"APPROVED": "✅", "PENDING": "⚠️", "REJECTED": "❌"}
 
 
 def display_status(status: str) -> str:
-    return f"{ICONS.get(status, 'ℹ️')} {LABELS.get(status, 'Processing')}"
+    return LABELS.get(status, "Processing")
 
 
 def mask_sensitive(value: Any, visible: int = 4) -> str:
@@ -25,18 +26,121 @@ def mask_sensitive(value: Any, visible: int = 4) -> str:
     return "•" * (len(string) - visible) + string[-visible:]
 
 
-def selected_reasons(application: dict, runs: list[dict], reviews: list[dict]) -> list[str]:
+def _document_guidance(message: str) -> tuple[str, str] | None:
+    """Describe a known document issue once, rather than listing dependent rule failures.
+
+    Use only the saved R02 document check; never guess that two PDFs are swapped
+    unless the backend had the stronger heading + field evidence to say so.
+    """
+    if "opposite slots" in message:
+        return (
+            "Your GST certificate and bank document may be in the wrong upload fields. "
+            "Check that each PDF is in the correct field, then resubmit.",
+            "Check your uploaded PDFs",
+        )
+    if message.startswith("Replace unreadable document(s):"):
+        gst = "GST certificate" in message
+        bank = "Bank proof" in message
+        if gst and bank:
+            return (
+                "We couldn't read your GST certificate or bank document. Upload PDF files "
+                "with selectable text (not just photos), then resubmit.",
+                "Replace both documents",
+            )
+        if bank:
+            return (
+                "We couldn't read your bank document. Upload a PDF with selectable text "
+                "showing the account holder, account number and IFSC, then resubmit.",
+                "Replace your bank document",
+            )
+        if gst:
+            return (
+                "We couldn't read your GST certificate. Upload a PDF with selectable text "
+                "showing the business name, GSTIN and state, then resubmit.",
+                "Replace your GST certificate",
+            )
+    if message.startswith("Upload:"):
+        gst = "GST certificate" in message
+        bank = "Bank proof" in message
+        if gst and bank:
+            return (
+                "Your GST certificate and bank document are missing. Upload both PDFs and resubmit.",
+                "Upload both documents",
+            )
+        if bank:
+            return (
+                "Your bank document is missing. Upload a bank confirmation PDF showing the "
+                "account holder, account number and IFSC, then resubmit.",
+                "Upload your bank document",
+            )
+        if gst:
+            return (
+                "Your GST certificate is missing. Upload a GST certificate PDF and resubmit.",
+                "Upload your GST certificate",
+            )
+    return None
+
+
+def vendor_document_guidance(run: dict | None) -> tuple[str, str] | None:
+    """Read-only display guidance from an actual failed document check."""
+    for check in ((run or {}).get("checks_json") or []):
+        if check.get("rule_id") == "R02" and check.get("state") == "FAIL":
+            return _document_guidance(str(check.get("vendor_message") or ""))
+    return None
+
+
+def vendor_readable_reasons(run: dict | None, reasons: list[str]) -> list[str]:
+    """Summarize root causes for vendors; never expose the R12 identity registry.
+
+    Original rule results remain in the saved run and the staff console.
+    """
+    checks = (run or {}).get("checks_json") or []
+    document = vendor_document_guidance(run)
+    if document:
+        primary, _heading = document
+        # Independent input errors must remain visible even when a document is
+        # missing, reversed or unreadable. Skip downstream document comparisons.
+        independent = [str(check.get("vendor_message") or "")
+                       for check in checks
+                       if check.get("rule_id") in {"R01", "R03", "R04", "R05", "R06", "R07", "R08", "R09", "R10", "R11"}
+                       and check.get("state") == "FAIL"]
+        return [primary, *[m for m in independent if m and m != primary]][:3]
+    cleaned: list[str] = []
+    for reason in reasons:
+        reason = str(reason)
+        if reason.startswith("Missing or unconfirmed document evidence:"):
+            reason = ("We couldn't confirm all the details from the uploaded PDFs. Check that "
+                      "your documents are complete and readable, then replace any unclear file.")
+        if reason not in cleaned:
+            cleaned.append(reason)
+    return cleaned
+
+
+def selected_reasons(application: dict, runs: list[dict], reviews: list[dict], *, audience: str = "admin") -> list[str]:
     """Manually reviewed status is explained by the latest human action, not old AI checks."""
     if application.get("decision_source") == "MANUAL" and reviews:
         action = reviews[0].get("action", "")
         reason = reviews[0].get("reason", "")
         verb = {"APPROVE": "Approved after human review", "REJECT": "Rejected by reviewer",
                 "REQUEST_CORRECTION": "Reviewer requested correction"}.get(action, "Reviewed")
-        return [f"{verb}: {reason}"] if reason else [verb]
+        return [f"{verb}: {vendor_safe_review_reason(reason) if audience == 'vendor' else reason}"] if reason else [verb]
     if runs:
-        return list(runs[0].get("reasons_json") or [])
+        reasons = list(runs[0].get("reasons_json") or [])
+        return vendor_readable_reasons(runs[0], reasons) if audience == "vendor" else reasons
     return ["No completed automated evaluation is available yet."]
 
+
+
+def vendor_visible_checks(checks: list[dict]) -> list[dict]:
+    """Public checks never reveal the existence of a matching registration."""
+    return [check for check in checks if check.get("rule_id") != "R12"]
+
+
+def vendor_safe_review_reason(reason: str) -> str:
+    """Never render private case identifiers from free-text admin reasons."""
+    if re.search(r"(?i)\b(duplicate|already\s+registered|prior\s+application|existing\s+vendor)\b|VF-[A-Z0-9-]{4,}", reason or ""):
+        return "Please contact the review team for details of this decision."
+    return reason
 
 def completed_counts(applications: list[dict], runs: list[dict]) -> dict[str, float | int | None]:
     status_counts = Counter(row.get("current_status") for row in applications)
