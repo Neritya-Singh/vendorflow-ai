@@ -163,3 +163,62 @@ def committed_pdf_types(run: dict | None) -> list[str]:
                 and isinstance(entry.get("version"), int)):
             found.append(doc_type)
     return found
+
+
+VENDOR_OWNER_LABELS = {
+    "Vendor": "you", "Reviewer": "the review team",
+    "Technical retry": "you — retry the document check", "Complete": "no one — final decision",
+}
+
+
+def vendor_owner_label(owner: str) -> str:
+    """Use plain-language ownership without adding a fourth application status."""
+    return VENDOR_OWNER_LABELS.get(owner, "the review team")
+
+
+def selected_review_case(rows: list[dict], selected_positions: list[int]) -> str | None:
+    """Fail closed on stale/invalid dataframe row selection; never pick another case.
+
+    The UI still requires manual ID confirmation before any review mutation.
+    """
+    if len(selected_positions) != 1:
+        return None
+    pos = selected_positions[0]
+    if type(pos) is not int or pos < 0 or pos >= len(rows):
+        return None
+    case_id = rows[pos].get("Application ID")
+    return case_id if isinstance(case_id, str) and case_id.startswith("VF-") else None
+
+
+def admin_review_issue_groups(checks: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Order reviewer-only findings: actual failures, then unknown evidence.
+
+    Never silently discard an unresolved check. The UI shows the three most
+    important findings and allows expansion of the rest; all remain inspectable.
+    This function does not modify or reinterpret backend check states.
+    """
+    failures: list[dict] = []
+    unverified: list[dict] = []
+    for check in checks:
+        state = str(check.get("state") or "UNKNOWN")
+        if state == "PASS":
+            continue
+        rule = str(check.get("rule_id") or "")
+        label = str(check.get("label") or "Check needs review")
+        if rule == "R12":
+            label = "Possible duplicate of an approved vendor"
+        elif rule == "R01" and state == "FAIL":
+            label = "Missing submission details"
+        elif rule == "R02" and state == "FAIL":
+            label = "Document evidence needed"
+        note = str(check.get("admin_detail") or check.get("vendor_message")
+                   or "This check requires a reviewer.").strip()
+        # Rules intentionally emit imperative 'Complete: ...' and 'Upload: ...'.
+        # Plain-English staff phrasing makes those actions unambiguous.
+        if note.startswith("Complete: "):
+            note = "Ask the vendor to provide: " + note[len("Complete: "):]
+        elif note.startswith("Upload: "):
+            note = "Ask the vendor to upload: " + note[len("Upload: "):]
+        item = {"state": state, "rule_id": rule, "label": label, "note": note}
+        (failures if state == "FAIL" else unverified).append(item)
+    return failures, unverified

@@ -13,7 +13,7 @@ ICONS = {"APPROVED": "✅", "PENDING": "⚠️", "REJECTED": "❌"}
 
 
 def display_status(status: str) -> str:
-    return f"{ICONS.get(status, 'ℹ️')} {LABELS.get(status, 'Processing')}"
+    return LABELS.get(status, "Processing")
 
 
 def mask_sensitive(value: Any, visible: int = 4) -> str:

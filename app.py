@@ -25,7 +25,7 @@ from vendorflow.admin_login_guard import (
 from vendorflow.rules import GST_STATE_CODES
 from vendorflow.ux_support import (
     VENDOR_NAV, active_review_request, admin_queue_rows, committed_pdf_types,
-    next_action_owner, valid_contact_email, vendor_next_step,
+    next_action_owner, valid_contact_email, vendor_next_step, vendor_owner_label, selected_review_case,
 )
 from vendorflow.ui_support import (
     comparison_assessments, comparison_rows, completed_counts, display_status, mask_sensitive,
@@ -48,292 +48,8 @@ except Exception:
 
 STATE_OPTIONS = ["Select state / UT"] + sorted(GST_STATE_CODES)
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;550;600;650;700&family=Manrope:wght@500;600;650;700;800&display=swap');
-:root {--vf-bg:#EDEBEC;--vf-surface:#FFFFFF;--vf-ink:#090808;--vf-muted:#6A6365;
-       --vf-primary:#602C2D;--vf-primary-tint:#F4E8E9;--vf-border:#E4DFE1;}
-html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
-    background: var(--vf-bg); color:var(--vf-ink);
-    font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
-}
-.block-container {max-width:1160px; padding:1.35rem 2.3rem 4rem;}
-h1,h2,h3,h4,[data-testid="stMetricValue"] {font-family:'Manrope','Inter',sans-serif; letter-spacing:-.035em;}
-h2,h3 {font-weight:750;color:var(--vf-ink);}
-p,small,label {line-height:1.6;}
-[data-testid="stHeader"] {background:transparent;}
-[data-testid="stForm"] {background:var(--vf-surface);border:1px solid var(--vf-border);
-    border-radius:16px;padding:1.45rem 1.65rem;box-shadow:0 5px 25px rgba(32,19,21,.025);}
-[data-testid="stVerticalBlockBorderWrapper"] {border-radius:16px;}
-[data-testid="stAlert"] {border-radius:12px;}
-[data-testid="stFileUploader"] {border-radius:12px;}
-[data-testid="stMetric"] {background:#fff;border:1px solid var(--vf-border);
-    border-radius:14px;padding:.9rem 1rem;min-height:112px;}
-div.stButton > button[kind="primary"], div.stFormSubmitButton > button[kind="primary"] {
-    background:var(--vf-primary);border-color:var(--vf-primary); color:#fff;
-}
-div.stButton > button, div.stFormSubmitButton > button {
-    border-radius:10px;min-height:2.7rem;font-weight:650;transition:background .14s ease;
-}
-div.stButton > button:focus-visible, div.stFormSubmitButton > button:focus-visible {
-    outline:3px solid #C59BA1;outline-offset:2px;
-}
-div[data-baseweb="input"] > div, div[data-baseweb="select"] > div, textarea {
-    border-radius:9px !important;}
-div[data-testid="stExpander"] {background:#fff;border:1px solid var(--vf-border);border-radius:12px;}
-[data-testid="stDataFrame"] {border-radius:11px;overflow:hidden;}
-.vf-brand {display:flex;align-items:center;gap:.65rem;font:800 .92rem 'Manrope',sans-serif;
-    letter-spacing:-.025em;color:var(--vf-ink); margin-bottom:.6rem;}
-.vf-mark {display:inline-flex;align-items:center;justify-content:center;width:31px;height:31px;
-    background:var(--vf-primary);color:#fff;border-radius:10px;font-size:.96rem;}
-.vf-tag {display:inline-block;padding:.2rem .58rem;border:1px solid var(--vf-border);
-    background:#fff;border-radius:7px;font-size:.75rem;color:var(--vf-muted);font-weight:600;}
-.vf-hero {font:800 clamp(1.65rem,2.7vw,2.2rem)/1.2 'Manrope','Inter',sans-serif;
-    letter-spacing:-.05em;color:var(--vf-ink);margin:.3rem 0 .45rem;}
-.vf-lead {font-size:.92rem;color:var(--vf-muted);margin:0 0 1.35rem;}
-.vf-section-subtitle {color:var(--vf-muted);font-size:.92rem;margin-top:-.35rem;margin-bottom:1.25rem;}
-.vf-steps {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.65rem;margin:.55rem 0 1.25rem;}
-.vf-step {background:rgba(255,255,255,.65);border:1px solid var(--vf-border);
-    border-radius:11px;padding:.8rem .85rem;display:flex;align-items:center;gap:.62rem;
-    font-size:.82rem;font-weight:600;color:var(--vf-muted);}
-.vf-step.vf-active {background:#fff;border-color:var(--vf-primary);color:var(--vf-ink);
-    box-shadow:0 2px 12px rgba(96,44,45,.04);}
-.vf-step.vf-done {color:var(--vf-primary);}
-.vf-step-index {display:inline-flex;align-items:center;justify-content:center; flex:0 0 25px;
-    width:25px;height:25px;border:1px solid #D4CBCE;border-radius:50%;font-size:.78rem;}
-.vf-active .vf-step-index {background:var(--vf-primary);color:#fff;border-color:var(--vf-primary);}
-.vf-done .vf-step-index {background:var(--vf-primary-tint);border-color:var(--vf-primary-tint);}
-.vf-summary {background:#fff;border:1px solid var(--vf-border);border-radius:14px;padding:1.1rem 1.3rem;
-    margin:.65rem 0 .9rem;}
-.vf-summary h4 {font:750 .96rem 'Manrope',sans-serif;margin:0 0 .55rem;}
-.vf-summary p {font-size:.88rem;color:var(--vf-ink);margin:.2rem 0;overflow-wrap:anywhere;}
-.vf-summary .vf-key {display:inline-block;min-width:116px;color:var(--vf-muted);}
-.vf-result {background:#fff;border:1px solid var(--vf-border);border-left:5px solid var(--vf-primary);
-    border-radius:14px;padding:1.1rem 1.35rem;margin:.8rem 0 1rem;}
-.vf-result.approved {border-left-color:#176A4E;}
-.vf-result.pending {border-left-color:#8F4620;}
-.vf-result.rejected {border-left-color:#9C3039;}
-.vf-result-heading {font:750 1.15rem 'Manrope','Inter',sans-serif;color:var(--vf-ink);margin:0 0 .35rem;}
-.vf-result ul {margin:.35rem 0 0;padding-left:1.35rem;}
-.vf-result li {font-size:.91rem;line-height:1.55;padding-bottom:.25rem;overflow-wrap:anywhere;}
-.vf-result-note {font-size:.78rem;color:var(--vf-muted);margin-top:.55rem;}
-.vf-callout {background:#fff;border:1px solid var(--vf-border);border-radius:14px;
-    padding:1rem 1.3rem;margin:.55rem 0 1rem;}
-.vf-step-live {font-size:.92rem;margin:.25rem 0;}
-@media (max-width:800px) {
- .block-container {padding:1rem .9rem 3rem;}
- [data-testid="stForm"] {padding:1rem;}
- .vf-steps {grid-template-columns:1fr;gap:.32rem;}
- .vf-step {padding:.5rem .7rem;}
- .vf-hero {font-size:1.65rem;}
- .vf-summary .vf-key {min-width:95px;}
-}
-
-/* VF theme consistency: native Streamlit widgets should match light SaaS surfaces. */
-[data-testid="stAppViewContainer"] {background: #EDEBEC; color: #090808;}
-[data-testid="stSidebar"] {background: #F7F5F5;}
-[data-testid="stWidgetLabel"] p, [data-testid="stWidgetLabel"] label,
-[data-testid="stMetricLabel"] p, [data-testid="stSidebar"] p {color: #534B4D !important;}
-[data-testid="stMetricValue"], [data-testid="stMetricValue"] div {color: #181416 !important;}
-[data-baseweb="input"] > div, [data-baseweb="select"] > div,
-[data-baseweb="textarea"] > div {background: #FFFFFF !important; border-color: #D6CED1 !important;}
-[data-baseweb="input"] input, [data-baseweb="textarea"] textarea,
-[data-baseweb="select"] input, [data-baseweb="select"] span {
-    color: #20191B !important; caret-color: #602C2D !important;
-}
-[data-baseweb="input"] input::placeholder, [data-baseweb="textarea"] textarea::placeholder {
-    color: #766E70 !important;
-}
-[data-testid="stFileUploader"] [data-testid="stFileUploaderDropzone"] {
-    background: #FAF8F9 !important; border: 1px dashed #B9ABAF !important;
-}
-[data-testid="stFileUploader"] [data-testid="stFileUploaderDropzone"] * {color: #30282A !important;}
-[data-testid="stForm"] {background: #FFFFFF !important;}
-[data-testid="stMetric"] {background: #FFFFFF !important;}
-/* The old :not([kind="primary"]) selector unintentionally styled some primary
-   form-submit buttons as secondary. Target secondary widgets explicitly. */
-button[data-testid="stBaseButton-secondary"],
-button[data-testid="stBaseButton-secondaryFormSubmit"],
-button[kind="secondary"] {
-    color: #30282A;
-    background: #FFFFFF;
-    border-color: #D5C9CD;
-}
-/* VF 3.5.4.5: neutral review information, not a yellow error banner. */
-.vf-review-notice {
-    display: flex;
-    align-items: flex-start;
-    gap: .7rem;
-    padding: .82rem 1rem;
-    margin: .75rem 0 1rem;
-    background: #F6F1F2;
-    color: #423536;
-    border: 1px solid #DED1D4;
-    border-left: 3px solid #602C2D;
-    border-radius: 10px;
-    font: 500 .86rem/1.55 'Inter', sans-serif;
-}
-.vf-review-notice strong { color: #602C2D; font-weight: 700; }
-.vf-review-notice-icon { color: #602C2D; font-weight: 750; font-size: 1rem; line-height: 1.35; }
-
-.vf-staff-caption {font-size: .8rem; color: #6A6365;}
-
-/* Stage 3.5.4.3: vendor-first emphasis and component consistency. */
-[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primary"],
-[data-testid="stFormSubmitButton"] button[kind="primary"],
-[data-testid="stButton"] button[data-testid="stBaseButton-primary"],
-[data-testid="stButton"] button[kind="primary"] {
-    background: #602C2D !important;
-    border: 1px solid #602C2D !important;
-    color: #FFFFFF !important;
-    box-shadow: 0 3px 10px rgba(96,44,45,.13) !important;
-    font-weight: 650 !important;
-}
-[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primary"]:hover,
-[data-testid="stFormSubmitButton"] button[kind="primary"]:hover,
-[data-testid="stButton"] button[data-testid="stBaseButton-primary"]:hover,
-[data-testid="stButton"] button[kind="primary"]:hover {
-    background: #4D2225 !important;
-    border-color: #4D2225 !important;
-    color: #FFFFFF !important;
-}
-[data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primary"]:focus-visible,
-[data-testid="stFormSubmitButton"] button[kind="primary"]:focus-visible {
-    outline: 3px solid #D2A7AD !important;
-    outline-offset: 3px !important;
-}
-/* VF CTA fix: target Streamlit primaryFormSubmit without overriding as secondary. */
-button[data-testid="stBaseButton-primaryFormSubmit"],
-button[data-testid="stBaseButton-primary"],
-button[kind="primary"] {
-    background-color: #602C2D !important;
-    border: 1px solid #602C2D !important;
-    color: #FFFFFF !important;
-    font-weight: 650 !important;
-    box-shadow: 0 3px 10px rgba(96,44,45,.13) !important;
-}
-button[data-testid="stBaseButton-primaryFormSubmit"]:hover,
-button[data-testid="stBaseButton-primary"]:hover,
-button[kind="primary"]:hover {
-    background-color: #4D2225 !important;
-    border-color: #4D2225 !important;
-}
-button[data-testid="stBaseButton-primaryFormSubmit"]:focus-visible,
-button[data-testid="stBaseButton-primary"]:focus-visible {
-    outline: 3px solid #D2A7AD !important;
-    outline-offset: 3px !important;
-}
-.vf-summary .vf-key {min-width:105px;}
-.vf-summary p {display:flex;align-items:baseline;gap:.6rem;margin:.43rem 0;}
-.vf-summary h4 {margin-bottom:.8rem;}
-.vf-summary .vf-value {color:#181416;font-weight:600;overflow-wrap:anywhere;}
-.vf-summary .vf-value.vf-missing {color:#7B4146;font-weight:650;}
-.vf-hint {color:#5F5558;font-size:.85rem;line-height:1.55;margin:.45rem 0 .85rem;}
-.vf-hint strong {color:#392C30;}
-@media (max-width:760px) {
-    .vf-summary p {display:block;margin:.56rem 0;}
-    .vf-summary .vf-key {display:block;min-width:0;}
-}
-
-
-/* Stage 3.5.5: restrained admin hierarchy, no impact on vendor form behaviour. */
-.vf-admin-eyebrow {font:700 .75rem 'Inter',sans-serif;letter-spacing:.12em;text-transform:uppercase;color:#602C2D;margin:1.3rem 0 .3rem;}
-.vf-admin-heading {font:750 1.35rem/1.35 'Manrope',sans-serif;letter-spacing:-.035em;color:#211A1C;margin:.15rem 0 .35rem;}
-.vf-admin-subtitle {font:400 .86rem/1.5 'Inter',sans-serif;color:#685F62;margin:0 0 1.1rem;}
-.vf-admin-panel {background:#fff;border:1px solid #E4DFE1;border-radius:14px;padding:1rem 1.1rem;margin:.55rem 0 1rem;}
-.vf-admin-panel-title {font:700 .91rem 'Manrope',sans-serif;color:#211A1C;margin:0 0 .4rem;}
-.vf-admin-panel-note {color:#685F62;font-size:.82rem;line-height:1.5;}
-.vf-admin-pill {display:inline-flex;padding:.24rem .55rem;background:#F4E8E9;color:#602C2D;border-radius:8px;font:650 .76rem 'Inter',sans-serif;}
-.vf-admin-issue {background:#FAF7F7;border:1px solid #E5D6D8;border-left:3px solid #8F5156;border-radius:10px;padding:.75rem .95rem;margin:.5rem 0;}
-.vf-admin-issue-label {font:700 .86rem 'Inter',sans-serif;color:#3C272B;margin:0 0 .15rem;}
-.vf-admin-issue-note {font:400 .83rem/1.5 'Inter',sans-serif;color:#53484B;margin:0;}
-.vf-admin-ok {background:#EDF5F0;border:1px solid #CDE4D4;border-radius:10px;color:#176A4E;padding:.7rem .9rem;margin:.6rem 0;font-size:.85rem;}
-.vf-admin-divider {height:1px;background:#E4DFE1;margin:1.3rem 0;}
-.vf-admin-caseid {font:700 .87rem 'Inter',sans-serif;color:#602C2D;}
-.vf-admin-danger-note {font:500 .82rem/1.5 'Inter',sans-serif;color:#7D424A;}
-[data-testid="stSidebar"] .stRadio label p {color:#33272A !important;}
-@media (max-width:780px){.vf-admin-panel{padding:.8rem;}}
-
-
-/* Stage 3.5.5.2: desktop staff workspace, without changing the compact vendor flow. */
-@media (min-width: 1024px) {
-  body:has(.vf-admin-view-marker) [data-testid="stMainBlockContainer"],
-  body:has(.vf-admin-view-marker) .block-container {
-    max-width: 1440px !important;
-    width: 100% !important;
-  }
-  body:has(.vf-admin-view-marker) [data-testid="stMainBlockContainer"] {
-    padding: 1.4rem clamp(1.25rem, 3vw, 3rem) 4rem !important;
-  }
-}
-body:has(.vf-admin-view-marker) [data-testid="stSidebar"] {
-  background: #F7F5F5 !important;
-}
-body:has(.vf-admin-view-marker) [data-testid="stSidebar"] [role="radiogroup"] label {
-  padding: .5rem .35rem;
-  border-radius: 9px;
-}
-body:has(.vf-admin-view-marker) [data-testid="stSidebar"] .stRadio label p {
-  font-size: .95rem !important;
-  font-weight: 550 !important;
-  color: #392F32 !important;
-}
-body:has(.vf-admin-view-marker) [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
-  font-size: .78rem !important;
-  font-weight: 700 !important;
-  letter-spacing: .04em;
-}
-.vf-admin-heading {font-size: 1.55rem; margin: .2rem 0 .5rem;}
-.vf-admin-eyebrow {font-size: .79rem; margin-top: 1.35rem;}
-.vf-admin-subtitle {font-size: .94rem;}
-.vf-admin-queue-note {font: 500 .9rem/1.55 'Inter',sans-serif;
-    color: #5C5053; margin: -.2rem 0 .9rem;}
-.vf-admin-queue-note strong {color: #602C2D;}
-.vf-admin-section-label {font: 700 .95rem/1.4 'Inter',sans-serif;
-    color: #3B2C30; margin: 1rem 0 .3rem;}
-.vf-admin-select-hint {border-left: 3px solid #B79EA3; background: #F8F5F6;
-    padding: .75rem 1rem; border-radius: 0 9px 9px 0;
-    margin: .6rem 0; font: .9rem/1.55 'Inter',sans-serif; color: #554B4E;}
-@media (max-width: 1023px) {
-  .vf-admin-heading {font-size: 1.3rem;}
-}
-
-
-/* Stage 3.5.5.3: clearer document evidence and deliberately neutral decisions. */
-.vf-evidence-scroll {overflow-x:auto;margin:.65rem 0 1.2rem;border-radius:13px;
-    border:1px solid #E4DFE1;background:#FFF;}
-.vf-evidence-table {width:100%;min-width:650px;border-collapse:collapse;
-    font:500 .84rem/1.55 'Inter',sans-serif;color:#30262A;}
-.vf-evidence-table th {background:#F7F4F5;color:#55494C;text-align:left;
-    font-weight:700;font-size:.78rem;letter-spacing:.005em;padding:.8rem .9rem;
-    border-bottom:1px solid #E4DFE1;}
-.vf-evidence-table td {padding:.78rem .9rem;border-bottom:1px solid #EEE9EB;
-    vertical-align:middle;overflow-wrap:anywhere;}
-.vf-evidence-table tr:last-child td {border-bottom:0;}
-.vf-evidence-table tr.vf-evidence-flag {background:#FCF4F5;}
-.vf-evidence-table tr.vf-evidence-missing {background:#FAF7F7;}
-.vf-evidence-table td:first-child {font-weight:650;}
-.vf-evidence-pill {display:inline-flex;align-items:center;white-space:nowrap;
-    font:700 .75rem/1.3 'Inter',sans-serif;padding:.28rem .52rem;
-    border-radius:7px;background:#EDF5F0;color:#176A4E;}
-.vf-evidence-pill.vf-evidence-flag {background:#F4E8E9;color:#7C3039;}
-.vf-evidence-pill.vf-evidence-missing {background:#F0EDEF;color:#5E5357;}
-.vf-evidence-disclaimer {font-size:.81rem;color:#5F5558;margin:.1rem 0 .9rem;}
-@media(max-width:800px) {.vf-evidence-table th,.vf-evidence-table td {padding:.68rem .62rem;}}
-
-/* Stage 6.3: clear landing choices and compact, responsive worklists. */
-.vf-welcome {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin:.65rem 0 1.2rem;}
-.vf-welcome-panel {background:#fff;border:1px solid #E4DFE1;border-radius:14px;
-    padding:1.05rem 1.2rem;min-height:124px;}
-.vf-welcome-panel h3 {font:750 1.05rem 'Manrope',sans-serif;color:#211A1C;margin:0 0 .45rem;}
-.vf-welcome-panel p {font:.88rem/1.5 'Inter',sans-serif;color:#554B4E;margin:0;}
-.vf-work-owner {padding:.75rem 1rem;border:1px solid #E4DFE1;border-radius:11px;
-    background:#fff;margin:.5rem 0 1rem;}
-.vf-work-owner strong {color:#602C2D;}
-@media (max-width:760px){.vf-welcome{grid-template-columns:1fr;}
- .vf-welcome-panel{min-height:auto;}}
-</style>
-""", unsafe_allow_html=True)
+from vendorflow.theme import apply_theme
+apply_theme()
 
 
 def repo_and_service() -> tuple[SupabaseRepository, PersistentVendorService]:
@@ -410,25 +126,31 @@ def result_banner(status: str, reasons: list[str], *, source: str = "AUTOMATED",
         title += " — after human review"
     variant = {"APPROVED": "approved", "PENDING": "pending", "REJECTED": "rejected"}.get(status, "pending")
     explanation = reasons or ["No explanation was recorded."]
-    reason_html = "".join(f"<li>{escape(str(reason))}</li>" for reason in explanation[:3])
+    reviewer_prefixes = ("Reviewer requested correction", "Rejected by reviewer", "Approved after human review")
+    reason_html = "".join(
+        f"<li><em>{escape(str(reason))}</em></li>"
+        if str(reason).startswith(reviewer_prefixes)
+        else f"<li>{escape(str(reason))}</li>"
+        for reason in explanation[:3]
+    )
     if audience == "admin":
         next_step = {
-            "APPROVED": "Final approval recorded. Review the audit history below.",
-            "PENDING": "Review the flagged checks and evidence before recording a decision.",
-            "REJECTED": "Final rejection recorded. This application is read-only.",
+            "APPROVED": "Final decision. This application is read-only.",
+            "PENDING": "Check the items below and the document comparison before deciding.",
+            "REJECTED": "Final decision. This application is read-only.",
         }.get(status, "")
     else:
         next_step = {
-            "APPROVED": "No further action is required in this demo.",
-            "PENDING": "Review the issues below or follow your reviewer's instructions.",
-            "REJECTED": "This application is final in the prototype. Contact the demo reviewer for assistance.",
+            "APPROVED": "Your details match your documents. You don't need to do anything else.",
+            "PENDING": "A few things need attention before this application can be approved:",
+            "REJECTED": "This application can't be approved. Contact the review team if you need help.",
         }.get(status, "")
+    # The "not official verification" limitation is stated once per page
+    # (vendor footer / admin evidence note), not repeated inside every banner.
     st.markdown(
-        f'<section class="vf-result {variant}" aria-label="Application outcome">'
-        f'<h3 class="vf-result-heading">{escape(title)}</h3>'
-        f'<p>{escape(next_step)}</p><ul>{reason_html}</ul>'
-        '<p class="vf-result-note">Prototype document-consistency decision only. '
-        'Not government, bank, or legal verification.</p></section>',
+        f'<section class="vf-result {variant}" role="status" aria-label="Application status: {escape(title)}">'
+        f'<h3 class="vf-result-heading"><span class="vf-result-title">{escape(title)}</span></h3>'
+        f'<p>{escape(next_step)}</p><ul>{reason_html}</ul></section>',
         unsafe_allow_html=True,
     )
 
@@ -441,13 +163,12 @@ def timeline(run: dict) -> None:
 
 
 def check_results(run: dict) -> None:
-    with st.expander("All rule checks and evidence"):
+    with st.expander("All checks"):
         rows = []
         for c in vendor_visible_checks(run.get("checks_json") or []):
             state = c.get("state", "UNKNOWN")
             detail = "Passed — no issue found" if state == "PASS" else (c.get("vendor_message") or "Requires review")
-            rows.append({"Rule": c.get("rule_id"), "Check": c.get("label"),
-                         "Outcome": state, "Detail": detail})
+            rows.append({"Check": c.get("label"), "Outcome": state, "Detail": detail})
         st.dataframe(rows, hide_index=True, width="stretch")
 
 
@@ -510,21 +231,32 @@ def show_step_header(index: int) -> None:
         )
     st.markdown('<nav class="vf-steps" aria-label="Application progress">' + ''.join(cards) + '</nav>',
                 unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="vf-mobile-step" aria-label="Step {index + 1} of 3: {escape(labels[index])}">'
+        f'<strong>Step {index + 1} of 3</strong> · {escape(labels[index])}'
+        f'<div class="vf-mobile-progress" role="progressbar" aria-valuemin="0" '
+        f'aria-valuemax="3" aria-valuenow="{index + 1}">'
+        f'<span style="width:{(index + 1) / 3 * 100:.2f}%"></span></div></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def business_fields(current: dict, prefix: str = "new") -> dict:
-    legal = st.text_input("Legal business name *", value=current.get("legal_name", ""), key=f"{prefix}_legal",
+    legal = st.text_input("Legal business name (required)", value=current.get("legal_name", ""), key=f"{prefix}_legal",
                           help="Enter the legal name shown on your GST certificate, not the trade name.")
+    # Group contact details together. In the previous two-column layout the
+    # optional contact person sat below State, opposite an unrelated email field.
     left, right = st.columns(2)
     with left:
-        current_state = current.get("business_state", "")
-        index = STATE_OPTIONS.index(current_state) if current_state in STATE_OPTIONS else 0
-        state = st.selectbox("Business state / UT", STATE_OPTIONS, index=index, key=f"{prefix}_state")
-        contact_name = st.text_input("Contact person", value=current.get("contact_name", ""), key=f"{prefix}_contact")
+        contact_email = st.text_input("Contact email (required)", value=current.get("contact_email", ""), key=f"{prefix}_email")
     with right:
-        contact_email = st.text_input("Contact email *", value=current.get("contact_email", ""), key=f"{prefix}_email")
-    st.markdown('<p class="vf-hint"><strong>Tax identifiers.</strong> PAN has 10 characters; GSTIN has 15. '
-                'The PAN must match characters 3–12 of the GSTIN.</p>', unsafe_allow_html=True)
+        contact_name = st.text_input("Contact person (optional)", value=current.get("contact_name", ""), key=f"{prefix}_contact",
+                                     help="Optional for submitting; missing information may lead to Pending Review.")
+    current_state = current.get("business_state", "")
+    index = STATE_OPTIONS.index(current_state) if current_state in STATE_OPTIONS else 0
+    state = st.selectbox("Business state / UT", STATE_OPTIONS, index=index, key=f"{prefix}_state")
+    st.markdown('<p class="vf-hint"><strong>Business identifiers.</strong> Enter the PAN and GSTIN used for this vendor account. '
+                'They will be checked against the uploaded GST certificate.</p>', unsafe_allow_html=True)
     pan_col, gstin_col = st.columns([1, 1.5])
     with pan_col:
         pan = st.text_input("PAN · 10 characters", value=current.get("pan", ""), key=f"{prefix}_pan", max_chars=10,
@@ -532,7 +264,7 @@ def business_fields(current: dict, prefix: str = "new") -> dict:
     with gstin_col:
         gstin = st.text_input("GSTIN · 15 characters", value=current.get("gstin", ""), key=f"{prefix}_gstin", max_chars=15,
                               help="GSTIN example: 09ABCDE1234F1Z5. It contains the PAN from characters 3–12.")
-    st.caption("* Legal name and email are required to submit. Other missing values route to Pending Review.")
+    st.caption("Legal business name and contact email are required. Other missing details may lead to Pending Review.")
     return {"legal_name": legal, "business_state": "" if state == STATE_OPTIONS[0] else state,
             "contact_name": contact_name, "contact_email": contact_email, "pan": pan, "gstin": gstin}
 
@@ -546,9 +278,28 @@ def bank_fields(current: dict, prefix: str = "new") -> dict:
                                key=f"{prefix}_account", help="Enter as text; leading zeros are preserved.")
     with right:
         ifsc = st.text_input("IFSC", value=current.get("ifsc", ""), key=f"{prefix}_ifsc", max_chars=11)
-    st.caption("Use the name, full account number (including leading zeros) and IFSC printed on your bank document. "
-               "These are compared with the PDF; no live bank verification is performed.")
+    st.caption("Enter these exactly as printed on your bank letter or cancelled cheque, including any leading zeros.")
     return {"bank_holder": holder, "account_number": number, "ifsc": ifsc}
+
+
+def recovery_card(application_id: str, tracking_code: str, *, before_submit: bool) -> None:
+    """White card, labelled identifiers in tinted copyable code fields.
+
+    st.code provides the native copy button. Only the vendor's own session ever
+    renders the tracking code; it is never placed in an admin or public table.
+    """
+    with st.container(border=True, key="vf-recovery-card"):
+        if before_submit:
+            st.markdown("**Save your recovery details before submitting**")
+            st.caption("If saving is interrupted, use both to resume this same application. "
+                       "The private code can't be recovered later.")
+        else:
+            st.markdown("**Save your recovery details**")
+            st.caption("You need both to track or correct this application. Keep the private code secure.")
+        st.markdown('<p class="vf-recovery-label">Application ID</p>', unsafe_allow_html=True)
+        st.code(application_id, language=None)
+        st.markdown('<p class="vf-recovery-label">Private tracking code</p>', unsafe_allow_html=True)
+        st.code(tracking_code, language=None)
 
 
 def review_summary_value(value: object, *, masked: bool = False) -> str:
@@ -564,8 +315,6 @@ def review_form_warnings(values: dict) -> list[str]:
     notes: list[str] = []
     pan = str(values.get("pan") or "").strip().upper()
     gstin = str(values.get("gstin") or "").strip().upper()
-    if pan and gstin and len(gstin) >= 12 and gstin[2:12] != pan:
-        notes.append("PAN and GSTIN appear inconsistent. Confirm both values before checking your application.")
     incomplete = [name for key, name in (
         ("business_state", "business state"), ("pan", "PAN"), ("gstin", "GSTIN"),
         ("bank_holder", "bank account holder"), ("account_number", "bank account number"),
@@ -581,24 +330,25 @@ def new_application() -> None:
         receipt = st.session_state.receipt
         st.subheader("Application result and receipt")
         result_banner(receipt.result.status.value, receipt.result.reasons)
-        st.markdown("#### Your tracking details")
-        st.markdown(f"**Application ID:** `{receipt.application_id}`")
-        st.warning("Save the tracking code securely. It is shown here for this session and cannot be recovered from the database.")
-        st.code(receipt.tracking_code, language=None)
         receipt_run = {
             "checks_json": [c.model_dump(mode="json") for c in receipt.result.checks],
             "extraction_error": receipt.result.extraction_error,
         }
         receipt_app = {"current_status": receipt.result.status.value}
-        st.info("**Next step:** " + vendor_next_step(receipt_app, receipt_run))
-        st.button("Track this application", key="receipt_track_current", type="primary",
-                  on_click=_track_receipt, args=(receipt.application_id, receipt.tracking_code))
-        st.caption(f"Run: {receipt.result.run_id} · {receipt.result.elapsed_ms / 1000:.2f}s · Persisted: {receipt.result.persisted}")
-        with st.expander("Detailed validation checks"):
-            st.dataframe([{"Rule": c["rule_id"], "Result": c["state"], "Check": c["label"],
+        st.markdown('<div class="vf-work-owner" role="status"><strong>Next step</strong><div>'
+                    f'{escape(vendor_next_step(receipt_app, receipt_run))}</div></div>', unsafe_allow_html=True)
+        recovery_card(receipt.application_id, receipt.tracking_code, before_submit=False)
+        with st.expander("All checks"):
+            st.dataframe([{"Result": c["state"], "Check": c["label"],
                            "Details": "Passed — no issue found" if c["state"] == "PASS" else c["vendor_message"]}
                           for c in vendor_visible_checks([c.model_dump(mode="json") for c in receipt.result.checks])], hide_index=True, width="stretch")
-        if st.button("Start another application"):
+        track_col, another_col, _ = st.columns([1.3, 1.3, 2], vertical_alignment="center")
+        with track_col:
+            st.button("Track this application", key="receipt_track_current", type="primary", width="stretch",
+                      on_click=_track_receipt, args=(receipt.application_id, receipt.tracking_code))
+        with another_col:
+            another = st.button("Start another application", width="stretch")
+        if another:
             st.session_state.pop("receipt", None)
             st.session_state.pop("new_draft", None)
             st.session_state.pop("prepared_intake", None)
@@ -609,7 +359,7 @@ def new_application() -> None:
         return
 
     st.subheader("Start a new application")
-    st.markdown('<p class="vf-section-subtitle">Three clear steps for GST-registered Indian businesses. Use synthetic sample details only.</p>',
+    st.markdown('<p class="vf-section-subtitle">Complete these three steps to submit your vendor onboarding details.</p>',
                 unsafe_allow_html=True)
     step = st.session_state.get("new_step", 0)
     show_step_header(step)
@@ -661,8 +411,7 @@ def new_application() -> None:
         for note in review_form_warnings(values):
             st.markdown(
                 '<div class="vf-review-notice" role="note">'
-                '<span class="vf-review-notice-icon" aria-hidden="true">ⓘ</span>'
-                '<div><strong>Details to review</strong><br>' + escape(note) + '</div>'
+                '<strong>Details to review</strong><br>' + escape(note) +
                 '</div>',
                 unsafe_allow_html=True,
             )
@@ -671,19 +420,13 @@ def new_application() -> None:
         if "prepared_intake" not in st.session_state:
             st.session_state.prepared_intake = prepare_intake()
         prepared = st.session_state.prepared_intake
-        st.info("Save these private recovery details before submitting. If the browser "
-                "closes or saving fails, use Track / Resume with the same details.")
-        st.write(f"**Recovery application ID:** `{prepared.application_id}`")
-        st.code(prepared.tracking_code, language=None)
+        recovery_card(prepared.application_id, prepared.tracking_code, before_submit=True)
         with st.form("new_documents"):
             st.markdown("**Upload supporting documents**")
-            st.caption("Upload a GST registration PDF and a bank letter or cancelled cheque PDF. "
-                       "Maximum 5 MB each. Use synthetic documents only; never upload real records. "
-                       "No official tax or bank verification is performed.")
+            st.caption("PDF only, up to 5 MB each. You can still submit without a document, "
+                       "but the application will then need review.")
             gst_file = st.file_uploader("GST registration certificate · PDF", type="pdf", key="gst_upload")
             bank_file = st.file_uploader("Bank letter or cancelled cheque · PDF", type="pdf", key="bank_upload")
-            st.caption("Missing documents cause Pending Review; invalid or oversized files are refused. "
-                       "Gemini reads the PDFs, while deterministic rules decide the outcome.")
             back_col, spacer, submit_col = st.columns([1, 2.4, 2])
             with back_col:
                 back = st.form_submit_button("← Back")
@@ -704,15 +447,13 @@ def new_application() -> None:
                 st.session_state.receipt = receipt
                 st.rerun()
             except Exception as exc:
-                st.error(safe_error(exc))
-                st.info("Keep the recovery ID and private tracking code shown above. "
-                        "You can retry this same application without creating a second one, "
-                        "or use Track / Resume after reopening the page.")
+                st.error(safe_error(exc) + " Your recovery details above still work: retry here, "
+                         "or use Track / correct later. No second application is created.")
 
 
 def track_application() -> None:
     st.subheader("Track or correct an application")
-    st.markdown('<p class="vf-section-subtitle">Check your latest decision, review any instructions and update only what needs correction.</p>',
+    st.markdown('<p class="vf-section-subtitle">Check your latest status, read any reviewer notes, and update only what needs correction.</p>',
                 unsafe_allow_html=True)
     credentials = st.session_state.get("vendor_auth")
     if not credentials:
@@ -731,9 +472,12 @@ def track_application() -> None:
         return
 
     app_id, token = credentials
-    if st.button("Stop tracking / sign out"):
-        st.session_state.pop("vendor_auth", None)
-        st.rerun()
+    id_col, signout_col = st.columns([4, 1], vertical_alignment="center")
+    with id_col:
+        st.markdown(f"Application **`{app_id}`**")  # set only after a successful service.track()
+    with signout_col:
+        st.button("Sign out", key="vendor_signout", width="stretch",
+                  on_click=lambda: st.session_state.pop("vendor_auth", None))
     try:
         repo, service = repo_and_service()
         record, runs = service.track(app_id, token)
@@ -772,80 +516,75 @@ def track_application() -> None:
     notice = st.session_state.pop("vendor_action_notice", None)
     if notice:
         st.success(notice)
-    st.caption(f"Application ID: {app_id}")
     result_banner(status, selected_reasons(record, runs, reviews, audience="vendor"), source=record.get("decision_source", "AUTOMATED"))
     latest_run = runs[0] if runs else None
     latest_review = reviews[0] if reviews else None
     owner = next_action_owner(record, latest_run, latest_review)
     st.markdown(
         '<div class="vf-work-owner" role="status">'
-        f'<strong>Next action: {escape(owner)}</strong><div>'
+        f'<strong>Waiting on: {escape(vendor_owner_label(owner))}</strong><div>'
         f'{escape(vendor_next_step(record, latest_run, latest_review))}</div></div>',
         unsafe_allow_html=True,
     )
 
     # A new saved evaluation supersedes an earlier correction instruction.
-    if status == "PENDING" and active_review_request(latest_review, latest_run):
-        st.warning("Action required — Reviewer requested a correction")
+    # selected_reasons() already puts a manual reviewer message in the status
+    # banner; only show it separately if the banner would not contain it.
+    if (status == "PENDING" and active_review_request(latest_review, latest_run)
+            and record.get("decision_source") != "MANUAL"):
         from vendorflow.ui_support import vendor_safe_review_reason
-        st.write(vendor_safe_review_reason(str(latest_review.get("reason") or
-                    "Please review your application and provide the requested correction.")))
-    if reviews and record.get("decision_source") == "MANUAL":
-        st.caption("Latest reviewer decision and rationale are shown above.")
+        st.warning("**Message from the review team:** " + vendor_safe_review_reason(
+            str(latest_review.get("reason") or
+                "Please review your application and provide the requested correction.")))
     if runs:
-        timeline(runs[0])
         check_results(runs[0])
-    with st.expander(f"Previous evaluations ({len(runs)})"):
-        st.dataframe([{"Run": r.get("id"), "Trigger": r.get("trigger"),
-                       "Automated outcome": r.get("status"), "Elapsed (s)": round(r.get("elapsed_ms",0)/1000,2),
-                       "Created": str(r.get("created_at"))[:19]} for r in runs],
+    with st.expander(f"History · {len(runs)} {'evaluation' if len(runs) == 1 else 'evaluations'}"):
+        st.dataframe([{"Evaluation": "Initial" if r.get("trigger") == "submission" else "Correction",
+                       "Outcome": display_status(str(r.get("status") or "")),
+                       "Date": str(r.get("created_at"))[:19]} for r in runs],
                      hide_index=True, width="stretch")
     if status != "PENDING":
-        st.info("This outcome is final in the MVP. Contact the demo administrator if further assistance is needed.")
-        return
+        return  # "Waiting on: no one — final decision" above already says so.
 
     st.markdown("### Correct or retry")
-    if owner == "Reviewer":
-        st.caption("A reviewer is handling this case. You can still submit a correction if you have new information.")
-    elif owner == "Technical retry":
-        st.caption("You may retry after a technical processing failure. The same application ID is preserved.")
-    st.info("Only update details that need correction. The PDFs from your latest committed run are reused unless replaced.")
-    reveal_form = st.checkbox("Show correction and retry form", value=(owner == "Vendor"),
-                              key="vendor_correction_form_visible")
-    if not reveal_form:
-        return
-    current = record.get("payload_json") or {}
-    with st.form("correction_form"):
-        st.markdown("**Business details**")
-        b = business_fields(current, prefix="edit")
-        st.markdown("**Bank details**")
-        k = bank_fields(current, prefix="edit")
-        st.markdown("**Document replacements (optional · 5 MB maximum each)**")
-        gst = st.file_uploader("Replace GST certificate · PDF", type="pdf", key="edit_gst_file")
-        bank = st.file_uploader("Replace bank proof · PDF", type="pdf", key="edit_bank_file")
-        submit = st.form_submit_button("Resubmit for checking", type="primary")
-    if submit:
-        if not b["legal_name"].strip():
-            st.error("Enter the legal business name.")
-            return
-        if not valid_contact_email(b["contact_email"]):
-            st.error("Enter a valid contact email address.")
-            return
-        try:
-            updated = VendorSubmission(**b, **k)
-            outcome = run_with_live_stages(lambda cb: service.resubmit(
-                app_id, token, updated, gst_upload=pdf_input(gst),
-                bank_upload=pdf_input(bank), stage_callback=cb,
-                expected_revision=int(record.get("revision", 0)),
-                expected_latest_run_id=record.get("latest_run_id")))
-            st.session_state.vendor_action_notice = (
-                "Your updated application was saved. The latest status and history are shown below."
-            )
-            # Freshly read the authoritative revision and decision on the rerun.
-            st.rerun()
-        except Exception as exc:
-            st.error(safe_error(exc))
-            st.info("Do not immediately retry if saving was interrupted; check the existing run history first.")
+    guidance = {
+        "Reviewer": "The review team is checking your application. You only need to resubmit if you have new information.",
+        "Technical retry": "Processing was interrupted. Retry the check; your application ID stays the same.",
+    }.get(owner, "Change only what needs fixing. Your current PDFs are reused unless you upload a replacement.")
+    st.caption(guidance)
+    with st.expander("Fix and resubmit", expanded=(owner in {"Vendor", "Technical retry"})):
+        current = record.get("payload_json") or {}
+        with st.form("correction_form"):
+            st.markdown("**Business details**")
+            b = business_fields(current, prefix="edit")
+            st.markdown("**Bank details**")
+            k = bank_fields(current, prefix="edit")
+            st.markdown("**Document replacements (optional · 5 MB maximum each)**")
+            gst = st.file_uploader("Replace GST certificate · PDF", type="pdf", key="edit_gst_file")
+            bank = st.file_uploader("Replace bank proof · PDF", type="pdf", key="edit_bank_file")
+            submit = st.form_submit_button("Resubmit for checking", type="primary")
+        if submit:
+            if not b["legal_name"].strip():
+                st.error("Enter the legal business name.")
+                return
+            if not valid_contact_email(b["contact_email"]):
+                st.error("Enter a valid contact email address.")
+                return
+            try:
+                updated = VendorSubmission(**b, **k)
+                outcome = run_with_live_stages(lambda cb: service.resubmit(
+                    app_id, token, updated, gst_upload=pdf_input(gst),
+                    bank_upload=pdf_input(bank), stage_callback=cb,
+                    expected_revision=int(record.get("revision", 0)),
+                    expected_latest_run_id=record.get("latest_run_id")))
+                st.session_state.vendor_action_notice = (
+                    "Your updated application was saved. The latest status and history are shown below."
+                )
+                # Freshly read the authoritative revision and decision on the rerun.
+                st.rerun()
+            except Exception as exc:
+                st.error(safe_error(exc))
+                st.info("Do not immediately retry if saving was interrupted; check the existing run history first.")
 
 
 
@@ -886,22 +625,23 @@ def admin_console() -> None:
         return
 
     st.session_state.pop("admin_password_input", None)
-    with st.sidebar:
-        st.markdown('<p class="vf-admin-section-label">Staff workspace</p>', unsafe_allow_html=True)
-        view = st.radio(
-            "Staff navigation",
-            ("Needs review", "All applications", "Decision history"),
-            key="admin_workspace_view",
-        )
-        st.divider()
-        if st.button("Log out of Admin Console", key="admin_logout", width="stretch"):
-            st.session_state.admin_authorized = False
-            st.session_state.pop("admin_selected_case_id", None)
-            st.session_state.pop("admin_evidence_requested", None)
-            st.rerun()
+    # Vendor portal and Log out live once, in the compact header row
+    # (render_top_bar). No second copy of either control is drawn here.
+    st.markdown('<h2>Admin Console</h2><p class="vf-admin-shell-note">Review applications, inspect evidence '
+                'and record decisions.</p>', unsafe_allow_html=True)
+    # Land reviewers on the exception queue; without this no tab is selected
+    # and the page silently fell through to "All applications".
+    if st.session_state.get("admin_workspace_view") not in ("Needs review", "All applications", "Decision history"):
+        st.session_state["admin_workspace_view"] = "Needs review"
+    view = st.segmented_control(
+        "Admin workspace",
+        ("Needs review", "All applications", "Decision history"),
+        key="admin_workspace_view",
+        required=True,
+        label_visibility="collapsed",
+    )
     # Changing sections never keeps a previously armed decision form.
     if st.session_state.get("_vf_previous_admin_view") != view:
-        st.session_state["admin_selected_case_id"] = None
         st.session_state["_vf_previous_admin_view"] = view
 
     notice = st.session_state.pop("admin_action_notice", None)
@@ -927,27 +667,30 @@ def admin_console() -> None:
         return
 
     kpis = completed_counts(apps, run_rows)
-    st.markdown('<p class="vf-admin-eyebrow">Overview</p>', unsafe_allow_html=True)
-    st.markdown('<h2 class="vf-admin-heading">Vendor operations at a glance</h2>', unsafe_allow_html=True)
+    st.markdown("### Workload overview")
     cols = st.columns(5)
     measures = (
         ("Applications", kpis["total"]),
         ("Approved", kpis["approved"]),
         ("Needs review", kpis["pending"]),
         ("Rejected", kpis["rejected"]),
-        ("Mean check time", f"{kpis['mean_seconds']:.2f}s" if kpis["mean_seconds"] is not None else "N/A"),
+        ("Mean automated check", f"{kpis['mean_seconds']:.2f}s" if kpis["mean_seconds"] is not None else "N/A"),
     )
     for col, (title, value) in zip(cols, measures):
-        col.metric(title, value)
+        with col:
+            if title == "Needs review":
+                with st.container(key="vf-kpi-pending"):
+                    st.metric(title, value)
+            else:
+                st.metric(title, value)
     st.caption(
         f"Synthetic prototype data · Mean automated evaluation time from "
         f"{kpis['run_count']} saved runs (not total vendor waiting time)."
     )
 
     if view == "Decision history":
-        st.markdown('<p class="vf-admin-eyebrow">Audit trail</p>', unsafe_allow_html=True)
-        st.markdown('<h2 class="vf-admin-heading">Recent reviewer actions</h2>', unsafe_allow_html=True)
-        st.markdown('<p class="vf-admin-subtitle">Read-only actions from saved audit records. Select Needs review to make decisions.</p>',
+        st.markdown("### Recent reviewer actions")
+        st.markdown('<p class="vf-admin-subtitle">Read-only audit records. Open Needs review to make a decision.</p>',
                     unsafe_allow_html=True)
         try:
             actions = (repo.client.table("review_actions")
@@ -958,7 +701,7 @@ def admin_console() -> None:
             return
         if actions:
             st.dataframe([{"Application": e.get("application_id"),
-                           "Action": e.get("action"),
+                           "Action": ACTION_LABELS.get(str(e.get("action")), e.get("action")),
                            "Reason": e.get("reason"),
                            "Reviewer": e.get("actor"),
                            "Date": str(e.get("created_at", ""))[:19]}
@@ -968,17 +711,13 @@ def admin_console() -> None:
         return
 
     heading = "Applications needing review" if view == "Needs review" else "All vendor applications"
-    description = ("Start with outstanding exceptions. Each decision requires a reason and case confirmation."
+    description = ("Pending Review cases, oldest first. Select a row to open the case."
                    if view == "Needs review" else
-                   "Search and inspect previously submitted applications. Final decisions are read-only.")
-    st.markdown('<p class="vf-admin-eyebrow">Review queue</p>', unsafe_allow_html=True)
-    st.markdown(f'<h2 class="vf-admin-heading">{escape(heading)}</h2>', unsafe_allow_html=True)
+                   "Every submitted application. Final decisions are read-only.")
+    st.markdown(f"### {heading}")
     st.markdown(f'<p class="vf-admin-subtitle">{escape(description)}</p>', unsafe_allow_html=True)
     if view == "Needs review":
         filter_status = "PENDING"
-        st.markdown('<p class="vf-admin-queue-note"><strong>Pending Review</strong> · '
-                    'Oldest applications first. Select one case explicitly before taking any action.</p>',
-                    unsafe_allow_html=True)
         search = st.text_input("Search by application ID or business name",
                                placeholder="Search pending applications", key="admin_search")
     else:
@@ -999,27 +738,29 @@ def admin_console() -> None:
               ).casefold())]
     subset.sort(key=lambda a: (a.get("current_status") != "PENDING", a.get("created_at") or ""))
     if not subset:
-        st.markdown('<div class="vf-admin-panel"><p class="vf-admin-panel-title">No matching applications</p>'
-                    '<p class="vf-admin-panel-note">Try a different search or switch to All applications.</p></div>',
-                    unsafe_allow_html=True)
+        message = ("No matching applications. Try another search."
+                   if search else "All clear — no applications in this view.")
+        st.info(message)
         return
-    st.dataframe(admin_queue_rows(subset, latest_runs, latest_reviews),
-                 hide_index=True, width="stretch", row_height=38,
-                 height=min(390, 48 + 38 * len(subset)))
-    st.caption("Action owner identifies the next step; it is not an additional decision status. "
-               "Age is time since the application was created, not an SLA.")
-    by_id = {a["id"]: a for a in subset}
-    # Prevent accidental carryover after decision: NEVER auto-select another vendor.
+    # The dataframe's selection state is read-only. Change the widget key after a
+    # saved decision; changing filters/search also produces a fresh keyed view.
     if st.session_state.pop("admin_clear_selection", False):
-        st.session_state["admin_selected_case_id"] = None
-    st.markdown('<p class="vf-admin-section-label">Open a case for review</p>',
-                unsafe_allow_html=True)
-    selected_id = st.selectbox(
-        "Application to inspect", list(by_id), index=None,
-        placeholder="Select a specific application to review",
-        key="admin_selected_case_id",
-        format_func=lambda aid: f"{aid} — {(by_id[aid].get('payload_json') or {}).get('legal_name', '')}",
-    )
+        st.session_state["admin_queue_epoch"] = st.session_state.get("admin_queue_epoch", 0) + 1
+    queue_key = f"admin_queue_{view}_{filter_status}_{search}_{st.session_state.get('admin_queue_epoch', 0)}"
+    queue_rows = admin_queue_rows(subset, latest_runs, latest_reviews)
+    import pandas as pd
+    queue_df = pd.DataFrame(queue_rows)
+    status_styles = {"Approved": "color:#067647;background:#ECFDF3",
+                     "Pending Review": "color:#93600A;background:#FFFAEB",
+                     "Rejected": "color:#B42318;background:#FEF3F2"}
+    styled_queue = queue_df.style.map(lambda v: status_styles.get(v, ""), subset=["Status"])
+    event = st.dataframe(styled_queue, hide_index=True, width="stretch", row_height=42,
+                         height=min(400, 52 + 42 * len(subset)),
+                         on_select="rerun", selection_mode="single-row", key=queue_key)
+    st.caption("Select a case to view its evidence below. Selecting a row never changes its decision.")
+    by_id = {a["id"]: a for a in subset}
+    chosen = event.selection.rows
+    selected_id = selected_review_case(queue_rows, chosen)
     if selected_id is None:
         st.markdown('<div class="vf-admin-select-hint">No case selected. Choose a specific application '
                     'above to inspect evidence. Nothing can be approved or rejected until a case is selected '
@@ -1034,11 +775,12 @@ def admin_console() -> None:
         return
 
     st.markdown('<div class="vf-admin-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<p class="vf-admin-eyebrow">Case review</p>', unsafe_allow_html=True)
-    st.markdown('<h2 class="vf-admin-heading">Application evidence</h2>', unsafe_allow_html=True)
-    st.markdown(f'<p class="vf-admin-subtitle">Case <span class="vf-admin-caseid">{escape(selected_id)}</span> · '
-                f'{escape(str((app.get("payload_json") or {}).get("legal_name", "")))}</p>',
+    st.markdown(f'<h3>Case <span class="vf-admin-caseid">{escape(selected_id)}</span> · '
+                f'{escape(str((app.get("payload_json") or {}).get("legal_name", "")))}</h3>',
                 unsafe_allow_html=True)
+    # The split panel compressed evidence to ~2/3 width, left half the canvas
+    # unused for final cases, and put the decision control beside rather than
+    # after the evidence. The Stage 6.3 full-width review was easier to scan.
     result_banner(app["current_status"], selected_reasons(app, runs, reviews),
                   source=app.get("decision_source", "AUTOMATED"), audience="admin")
     from vendorflow.ux_support import primary_review_issue
@@ -1051,30 +793,44 @@ def admin_console() -> None:
 
     if runs:
         checks = runs[0].get("checks_json") or []
-        flagged = [c for c in checks if c.get("state") != "PASS"]
-        st.markdown("#### Checks requiring attention")
-        if flagged:
-            for c in flagged:
-                label = ("Possible duplicate of an approved vendor" if c.get("rule_id") == "R12"
-                         else str(c.get("label") or c.get("rule_id") or "Review required"))
-                note = str(c.get("admin_detail") or c.get("vendor_message") or
-                           "This check requires human attention.")
+        from vendorflow.ux_support import admin_review_issue_groups
+        failed, unverified = admin_review_issue_groups(checks)
+        st.markdown("#### Checks needing attention")
+        if failed or unverified:
+            st.markdown(
+                f"**{len(failed)} needing correction · {len(unverified)} awaiting verification**"
+            )
+
+            def render_issue(issue: dict) -> None:
+                kind = "vf-admin-issue-fail" if issue["state"] == "FAIL" else "vf-admin-issue-unknown"
+                heading = "Correction needed" if issue["state"] == "FAIL" else "Not yet verified"
                 st.markdown(
-                    '<div class="vf-admin-issue">'
-                    f'<p class="vf-admin-issue-label">{escape(label)}</p>'
-                    f'<p class="vf-admin-issue-note">{escape(note)}</p>'
+                    f'<div class="vf-admin-issue {kind}">'
+                    f'<p class="vf-admin-issue-type">{heading}</p>'
+                    f'<p class="vf-admin-issue-label">{escape(issue["label"])}</p>'
+                    f'<p class="vf-admin-issue-note">{escape(issue["note"])}</p>'
                     '</div>', unsafe_allow_html=True,
                 )
+
+            priority = (failed + unverified)
+            for issue in priority[:3]:
+                render_issue(issue)
+            if len(priority) > 3:
+                with st.expander(f"Show {len(priority) - 3} more checks needing attention"):
+                    for issue in priority[3:]:
+                        render_issue(issue)
         else:
-            st.markdown('<div class="vf-admin-ok">✓ No automated checks currently require attention.</div>',
+            st.markdown('<div class="vf-admin-ok">All automated checks passed.</div>',
                         unsafe_allow_html=True)
         st.markdown("#### Submitted information vs. PDF evidence")
         st.caption("Highlighted rows need attention. Sensitive identifiers are masked by default.")
         admin_evidence_table(app.get("payload_json") or {}, runs[0].get("extracted_json") or {}, checks)
         staff_check_results(runs[0])
-        timeline(runs[0])
     else:
         st.info("No completed automated evaluation is available for this case.")
+
+    # A reviewer should have access to the exact verified PDFs BEFORE choosing a decision.
+    # This remains read-only and stays bound to the selected committed run.
     with st.expander("Verified PDF evidence · staff only"):
         if selected_run:
             pdf_types = committed_pdf_types(selected_run)
@@ -1101,98 +857,117 @@ def admin_console() -> None:
                 st.caption("No committed PDF references are available for this run.")
         else:
             st.caption("No completed run is available; there is no verified evidence to download.")
-    with st.expander("Document versions and audit history"):
-        st.markdown("**Exact PDF versions bound to each committed evaluation**")
-        evidence_rows = []
-        for run in runs:
-            for entry in run.get("document_manifest") or []:
-                evidence_rows.append({"Run": run.get("id"),
-                                      "Type": entry.get("doc_type"),
-                                      "Version": entry.get("version"),
-                                      "SHA-256": entry.get("file_sha256", "")[:16] + "…"})
-        if evidence_rows:
-            st.dataframe(evidence_rows, hide_index=True, width="stretch")
-        else:
-            st.caption("No committed document references; replacement PDFs must be uploaded for evaluation.")
-        st.caption("Staged or interrupted uploads are not evidence for a completed run. "
-                   "Private PDFs are never exposed through public links.")
-        st.markdown("**Reviewer actions**")
-        if reviews:
-            st.dataframe([{"Action": e.get("action"), "Reason": e.get("reason"),
-                           "Reviewer": e.get("actor"), "Date": str(e.get("created_at", ""))[:19]}
-                          for e in reviews], hide_index=True, width="stretch")
-        else:
-            st.caption("No reviewer actions yet.")
-        st.markdown("**Past automated evaluations**")
+
+    def render_audit_details() -> None:
+        """Supporting records, shown after the decision step (or after evidence for final cases)."""
+        st.markdown("#### Documents and audit history")
         if runs:
-            st.dataframe([{"Run": r.get("id"), "Trigger": r.get("trigger"),
-                           "Automated outcome": r.get("status"), "Date": str(r.get("created_at", ""))[:19]}
-                          for r in runs], hide_index=True, width="stretch")
+            timeline(runs[0])
+        with st.expander("Document versions and audit history"):
+            st.markdown("**Exact PDF versions bound to each committed evaluation**")
+            evidence_rows = []
+            for run in runs:
+                for entry in run.get("document_manifest") or []:
+                    evidence_rows.append({"Run": run.get("id"),
+                                          "Type": entry.get("doc_type"),
+                                          "Version": entry.get("version"),
+                                          "SHA-256": entry.get("file_sha256", "")[:16] + "…"})
+            if evidence_rows:
+                st.dataframe(evidence_rows, hide_index=True, width="stretch")
+            else:
+                st.caption("No committed document references; replacement PDFs must be uploaded for evaluation.")
+            st.caption("Staged or interrupted uploads are not evidence for a completed run. "
+                       "Private PDFs are never exposed through public links.")
+            st.markdown("**Reviewer actions**")
+            if reviews:
+                st.dataframe([{"Action": ACTION_LABELS.get(str(e.get("action")), e.get("action")), "Reason": e.get("reason"),
+                               "Reviewer": e.get("actor"), "Date": str(e.get("created_at", ""))[:19]}
+                              for e in reviews], hide_index=True, width="stretch")
+            else:
+                st.caption("No reviewer actions yet.")
+            st.markdown("**Past automated evaluations**")
+            if runs:
+                st.dataframe([{"Run": r.get("id"), "Trigger": r.get("trigger"),
+                               "Automated outcome": r.get("status"), "Date": str(r.get("created_at", ""))[:19]}
+                              for r in runs], hide_index=True, width="stretch")
 
     if app.get("current_status") != "PENDING":
-        st.info("Final decision recorded. No further administrator actions are available for this case.")
+        # Finalised: no decision controls at all, only the read-only records.
+        st.caption("Final decision recorded. This case is read-only.")
+        render_audit_details()
         return
     if not runs:
         st.info("The vendor must resume this interrupted application before a reviewer can decide.")
+        render_audit_details()
         return
     st.markdown('<div class="vf-admin-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<p class="vf-admin-eyebrow">Decision desk</p>', unsafe_allow_html=True)
-    st.markdown('<h2 class="vf-admin-heading">Choose a resolution</h2>', unsafe_allow_html=True)
-    st.caption("Choose exactly one action, provide a reason and confirm this application's ID. "
-               "A document match alone is not independent bank or tax verification.")
-    with st.form(f"admin_decision_form_{selected_id}"):
-        st.markdown(f'**Decision target:** `{selected_id}` — '
-                    f'{(app.get("payload_json") or {}).get("legal_name", "")}',
-                    unsafe_allow_html=False)
-        reason = st.text_area("Reason shown to vendor and retained in audit history", max_chars=1000,
-                              placeholder="Explain the specific evidence reviewed or correction required.")
-        confirm_case = st.checkbox(f"I confirm this action applies to {selected_id}", value=False)
-        reviewed_evidence = st.checkbox("For approval, I have reviewed the available evidence and understand this is not official verification.", value=False)
-        first, second, third = st.columns(3)
-        with first:
-            approve = st.form_submit_button("✓ Approve after review")
-        with second:
-            request = st.form_submit_button("↩ Request correction")
-        with third:
-            reject = st.form_submit_button("✕ Reject")
-    action = "APPROVE" if approve else "REQUEST_CORRECTION" if request else "REJECT" if reject else None
-    if action:
-        if len(reason.strip()) < 3:
-            st.error("A specific written rationale is required before saving any decision.")
-            return
-        if not confirm_case:
-            st.error(f"Confirm the application ID ({selected_id}) before saving.")
-            return
-        if action == "APPROVE" and not reviewed_evidence:
-            st.error("Confirm that you reviewed the available evidence before recording manual approval.")
-            return
-        # No repeat of an unchanged correction message. Backend still protects terminal cases.
-        if action == "REQUEST_CORRECTION" and reviews:
-            latest = reviews[0]
-            if (latest.get("action") == "REQUEST_CORRECTION"
-                    and str(latest.get("reason") or "").strip() == reason.strip()):
-                from datetime import datetime
-                def as_dt(value):
-                    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-                try:
-                    still_active = (not runs or as_dt(latest["created_at"]) >= as_dt(runs[0]["created_at"]))
-                except (KeyError, TypeError, ValueError):
-                    still_active = True
-                if still_active:
-                    st.info("This identical correction request is already recorded; no duplicate was saved.")
-                    return
-        try:
-            repo.admin_review(selected_id, action, reason,
-                              expected_revision=int(app.get("revision", 0)),
-                              expected_latest_run_id=app.get("latest_run_id"))
-            st.session_state["admin_action_notice"] = (
-                f"{action.replace('_', ' ').title()} saved for {selected_id}. "
-                "Select another case to continue."
-            )
-            st.session_state["admin_clear_selection"] = True
-            st.rerun()
-        except Exception as exc:
-            st.error(safe_error(exc))
+    with st.container(border=True, key="vf-decision-panel"):
+        st.markdown('<h2 class="vf-admin-heading">Record a decision</h2>', unsafe_allow_html=True)
+        st.caption("Choose one action, write the reason the vendor will see, and confirm the application ID.")
+        choice = st.segmented_control("Resolution", ("Request correction", "Approve", "Reject"),
+                                      key=f"admin_choice_{selected_id}_{int(app.get('revision', 0))}")
+        actions = {"Approve": "APPROVE", "Request correction": "REQUEST_CORRECTION", "Reject": "REJECT"}
+        action = actions.get(choice)
+        if action:
+            with st.form(f"admin_decision_form_{selected_id}_{int(app.get('revision', 0))}"):
+                st.markdown(f"**Decision target:** `{selected_id}`")
+                reason = st.text_area("Message to vendor and audit history", max_chars=1000,
+                                      placeholder="State the evidence reviewed or correction required.")
+                confirm_case = st.checkbox(f"I confirm this decision applies to {selected_id}", value=False)
+                reviewed_evidence = (st.checkbox("I reviewed the evidence and understand this is not official verification.", value=False)
+                                     if action == "APPROVE" else True)
+                action_labels = {"APPROVE": "Approve after review", "REQUEST_CORRECTION": "Send correction request",
+                                 "REJECT": "Reject application"}
+                with st.container(key="vf-danger" if action == "REJECT" else "vf-decision-submit"):
+                    submitted = st.form_submit_button(action_labels[action],
+                                                      type="secondary" if action == "REJECT" else "primary",
+                                                      width="content")
+        else:
+            submitted = False
+
+        def save_decision() -> None:
+            """Validation errors render inside the decision panel, next to the form."""
+            if len(reason.strip()) < 3:
+                st.error("A specific written rationale is required before saving any decision.")
+                return
+            if not confirm_case:
+                st.error(f"Confirm the application ID ({selected_id}) before saving.")
+                return
+            if action == "APPROVE" and not reviewed_evidence:
+                st.error("Confirm that you reviewed the available evidence before recording manual approval.")
+                return
+            # No repeat of an unchanged correction message. Backend still protects terminal cases.
+            if action == "REQUEST_CORRECTION" and reviews:
+                latest = reviews[0]
+                if (latest.get("action") == "REQUEST_CORRECTION"
+                        and str(latest.get("reason") or "").strip() == reason.strip()):
+                    from datetime import datetime
+                    def as_dt(value):
+                        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                    try:
+                        still_active = (not runs or as_dt(latest["created_at"]) >= as_dt(runs[0]["created_at"]))
+                    except (KeyError, TypeError, ValueError):
+                        still_active = True
+                    if still_active:
+                        st.info("This identical correction request is already recorded; no duplicate was saved.")
+                        return
+            try:
+                repo.admin_review(selected_id, action, reason,
+                                  expected_revision=int(app.get("revision", 0)),
+                                  expected_latest_run_id=app.get("latest_run_id"))
+                wording = {"APPROVE": "Approval recorded", "REQUEST_CORRECTION": "Correction request sent",
+                           "REJECT": "Rejection recorded"}
+                st.session_state["admin_action_notice"] = (
+                    f"{wording[action]} for {selected_id}. Select another case to continue."
+                )
+                st.session_state["admin_clear_selection"] = True
+                st.rerun()
+            except Exception as exc:
+                st.error(safe_error(exc))
+
+        if submitted and action:
+            save_decision()
+    render_audit_details()
 
 
 def _track_receipt(application_id: str, tracking_code: str) -> None:
@@ -1207,25 +982,76 @@ def _choose_vendor_page(destination: str) -> None:
         st.session_state.vendor_page = destination
 
 
+def render_vendor_header() -> None:
+    """Same heading on Welcome, New application and Track / correct."""
+    st.markdown('<h1 class="vf-hero">Vendor onboarding made easy.</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="vf-lead">Use this portal to submit your business and bank details, upload supporting PDFs, '
+                'check your application status and respond to correction requests.</p>',
+                unsafe_allow_html=True)
+
+
+def render_vendor_footer() -> None:
+    """The demo limitation, stated once per page instead of in every banner."""
+    st.markdown('<p class="vf-demo-note">Demo for GST-registered Indian businesses. Use synthetic details and PDFs only. '
+                '"Approved" means your details match your documents; it is not an official GST, PAN or bank verification.</p>',
+                unsafe_allow_html=True)
+
+
 def vendor_welcome() -> None:
     st.subheader("How can we help you today?")
-    st.markdown('<div class="vf-welcome">'
-                '<section class="vf-welcome-panel"><h3>Submit a new application</h3>'
-                '<p>Enter business and banking details, upload two PDFs, and get an explained result.</p></section>'
-                '<section class="vf-welcome-panel"><h3>Track or correct a submission</h3>'
-                '<p>Use your application ID and private tracking code to view a decision or fix an issue.</p></section>'
-                '</div>', unsafe_allow_html=True)
-    a, b = st.columns(2)
-    with a:
-        st.button("Start a new application", type="primary", width="stretch",
-                  on_click=_choose_vendor_page, args=("New application",), key="welcome_new")
-    with b:
-        st.button("Track or correct", width="stretch",
-                  on_click=_choose_vendor_page, args=("Track / correct application",), key="welcome_track")
-    st.caption("India-only GST-registered vendor demo · Use synthetic records only · "
-               "PDF maximum 5 MB each · Save the private tracking code after submission.")
-    st.info("Approved means the submitted fields matched the provided documents in this prototype. "
-            "It is not an official GST, PAN or bank-ownership verification.")
+    first, second = st.columns(2)
+    with first:
+        with st.container(border=True, key="vf-welcome-new"):
+            st.markdown('<p class="vf-welcome-title">Start a new application</p>', unsafe_allow_html=True)
+            st.caption("Three short steps: business details, bank details, then upload your GST certificate and bank proof.")
+            st.button("Start application", type="primary", width="stretch",
+                      on_click=_choose_vendor_page, args=("New application",), key="welcome_new")
+    with second:
+        with st.container(border=True, key="vf-welcome-track"):
+            st.markdown('<p class="vf-welcome-title">Track or correct your application</p>', unsafe_allow_html=True)
+            st.caption("Use your application ID and private tracking code to check status or answer a correction request.")
+            st.button("Track or correct", width="stretch",
+                      on_click=_choose_vendor_page, args=("Track / correct application",), key="welcome_track")
+
+
+ACTION_LABELS = {"APPROVE": "Approved", "REJECT": "Rejected", "REQUEST_CORRECTION": "Correction requested"}
+
+
+def _return_to_vendor_portal() -> None:
+    """Button callback: clear staff access and land on Vendor Welcome.
+
+    Runs before the next script run (on_click), so the first click always takes
+    effect and no admin content is drawn after sign-out. Streamlit reruns
+    automatically after a callback; calling st.rerun() here would be a no-op.
+    """
+    st.session_state["admin_authorized"] = False
+    for key in ("admin_selected_case_id", "admin_evidence_requested",
+                "admin_password_input", "admin_action_notice"):
+        st.session_state.pop(key, None)
+    st.session_state["vendor_page"] = "Welcome"
+    st.query_params["portal"] = "vendor"
+
+
+def _open_staff_portal() -> None:
+    st.query_params["portal"] = "admin"
+
+
+def render_top_bar(is_admin_portal: bool) -> None:
+    """One compact header row: brand + INDIA · DEMO on the left, navigation on the right."""
+    with st.container(horizontal=True, vertical_alignment="center", key="vf-topnav"):
+        st.markdown('<div class="vf-brand"><span class="vf-mark">V</span> VendorFlow AI '
+                    '<span class="vf-tag">INDIA · DEMO</span></div>', unsafe_allow_html=True, width="content")
+        with st.container(horizontal=True, horizontal_alignment="right", vertical_alignment="center", gap="small"):
+            if is_admin_portal:
+                # Available before sign-in, after sign-in and after logout.
+                st.button("Vendor portal", key="admin_header_vendor_portal", width="content",
+                          on_click=_return_to_vendor_portal)
+                if st.session_state.get("admin_authorized"):
+                    st.button("Log out", key="admin_logout", width="content",
+                              on_click=_return_to_vendor_portal)
+            else:
+                st.button("Staff sign-in", key="open_staff_portal", width="content",
+                          on_click=_open_staff_portal)
 
 
 # Vendor-first navigation: staff tools are not displayed on the applicant landing page.
@@ -1233,47 +1059,28 @@ def vendor_welcome() -> None:
 is_admin_portal = st.query_params.get("portal") == "admin"
 if is_admin_portal:
     st.markdown('<span class="vf-admin-view-marker" aria-hidden="true"></span>', unsafe_allow_html=True)
-with st.sidebar:
-    st.markdown("**VendorFlow AI**")
-    st.caption("India-only synthetic demo")
-    st.divider()
-    if is_admin_portal:
-        if st.button("← Back to Vendor Portal", key="go_vendor_portal", width="stretch"):
-            st.session_state.pop("admin_authorized", None)
-            st.query_params["portal"] = "vendor"
-            st.rerun()
-    else:
-        st.markdown('<span class="vf-staff-caption">For finance and procurement staff</span>',
-                    unsafe_allow_html=True)
-        if st.button("Staff access", key="open_staff_portal", width="stretch"):
-            st.query_params["portal"] = "admin"
-            st.rerun()
-
-st.markdown('<div class="vf-brand"><span class="vf-mark">V</span> VendorFlow AI '
-            '<span class="vf-tag">INDIA · DEMO</span></div>', unsafe_allow_html=True)
-if is_admin_portal:
-    st.markdown('<h1 class="vf-hero">Finance operations workspace</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="vf-lead">Review flagged applications and record auditable decisions.</p>',
-                unsafe_allow_html=True)
-else:
-    st.markdown('<h1 class="vf-hero">Vendor onboarding, without the back-and-forth.</h1>',
-                unsafe_allow_html=True)
-    st.markdown('<p class="vf-lead">A simpler way to submit documents, understand decisions and resolve exceptions.</p>',
-                unsafe_allow_html=True)
+render_top_bar(is_admin_portal)
 
 if is_admin_portal:
     admin_console()
 else:
+    render_vendor_header()
     # Initialise the keyed navigation once; callback updates its Session State.
     # Passing default= as well would trigger Streamlit's duplicate-default warning.
     if st.session_state.get("vendor_page") not in VENDOR_NAV:
         st.session_state["vendor_page"] = "Welcome"
-    page = st.segmented_control("Vendor navigation", VENDOR_NAV,
-                                required=True, key="vendor_page",
-                                label_visibility="collapsed")
+    if st.session_state["vendor_page"] == "Welcome":
+        # The two large task buttons already provide navigation here.
+        # Avoid a second, redundant three-tab control above the same actions.
+        page = "Welcome"
+    else:
+        page = st.segmented_control("Vendor navigation", VENDOR_NAV,
+                                    required=True, key="vendor_page",
+                                    label_visibility="collapsed")
     if page == "Track / correct application":
         track_application()
     elif page == "New application":
         new_application()
     else:
         vendor_welcome()
+    render_vendor_footer()
