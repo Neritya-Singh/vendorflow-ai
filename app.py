@@ -25,11 +25,11 @@ from vendorflow.admin_login_guard import (
 from vendorflow.rules import GST_STATE_CODES
 from vendorflow.ux_support import (
     VENDOR_NAV, active_review_request, admin_queue_rows, committed_pdf_types,
-    next_action_owner, valid_contact_email, vendor_next_step, vendor_owner_label, selected_review_case,
+    next_action_owner, valid_contact_email, vendor_next_step, vendor_action_heading, selected_review_case,
 )
 from vendorflow.ui_support import (
     comparison_assessments, comparison_rows, completed_counts, display_status, mask_sensitive,
-    selected_reasons, stage_rows, vendor_visible_checks,
+    selected_reasons, stage_rows, vendor_visible_checks, vendor_readable_reasons,
 )
 
 st.set_page_config(page_title="VendorFlow AI | Onboarding", page_icon="📋", layout="wide", initial_sidebar_state="collapsed")
@@ -163,11 +163,20 @@ def timeline(run: dict) -> None:
 
 
 def check_results(run: dict) -> None:
+    from vendorflow.ui_support import vendor_document_guidance
     with st.expander("All checks"):
         rows = []
+        document = vendor_document_guidance(run)
         for c in vendor_visible_checks(run.get("checks_json") or []):
             state = c.get("state", "UNKNOWN")
-            detail = "Passed — no issue found" if state == "PASS" else (c.get("vendor_message") or "Requires review")
+            rule = c.get("rule_id")
+            if document and ((rule in {"R08", "R09", "R10", "R11"} and state == "UNKNOWN")
+                             or (rule in {"R13", "R14"} and state != "PASS")):
+                # Don't repeat secondary failures caused by a missing/unreadable PDF.
+                continue
+            detail = ("Passed — no issue found" if state == "PASS" else
+                      document[0] if document and rule == "R02" else
+                      c.get("vendor_message") or "Requires review")
             rows.append({"Check": c.get("label"), "Outcome": state, "Detail": detail})
         st.dataframe(rows, hide_index=True, width="stretch")
 
@@ -329,19 +338,36 @@ def new_application() -> None:
     if st.session_state.get("receipt"):
         receipt = st.session_state.receipt
         st.subheader("Application result and receipt")
-        result_banner(receipt.result.status.value, receipt.result.reasons)
         receipt_run = {
             "checks_json": [c.model_dump(mode="json") for c in receipt.result.checks],
             "extraction_error": receipt.result.extraction_error,
         }
         receipt_app = {"current_status": receipt.result.status.value}
-        st.markdown('<div class="vf-work-owner" role="status"><strong>Next step</strong><div>'
-                    f'{escape(vendor_next_step(receipt_app, receipt_run))}</div></div>', unsafe_allow_html=True)
+        result_banner(receipt.result.status.value,
+                      vendor_readable_reasons(receipt_run, receipt.result.reasons))
+        if receipt.result.status.value == "PENDING":
+            st.markdown('<div class="vf-work-owner" role="status"><strong>'
+                        f'{escape(vendor_action_heading(receipt_app, receipt_run))}</strong><div>'
+                        f'{escape(vendor_next_step(receipt_app, receipt_run))}</div></div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="vf-work-owner" role="status"><strong>Application complete</strong><div>'
+                        'Save your receipt and tracking details for future reference.</div></div>',
+                        unsafe_allow_html=True)
         recovery_card(receipt.application_id, receipt.tracking_code, before_submit=False)
         with st.expander("All checks"):
-            st.dataframe([{"Result": c["state"], "Check": c["label"],
-                           "Details": "Passed — no issue found" if c["state"] == "PASS" else c["vendor_message"]}
-                          for c in vendor_visible_checks([c.model_dump(mode="json") for c in receipt.result.checks])], hide_index=True, width="stretch")
+            from vendorflow.ui_support import vendor_document_guidance
+            receipt_document = vendor_document_guidance(receipt_run)
+            rows = []
+            for c in vendor_visible_checks(receipt_run["checks_json"]):
+                state, rule = c["state"], c["rule_id"]
+                if receipt_document and ((rule in {"R08", "R09", "R10", "R11"} and state == "UNKNOWN")
+                                         or (rule in {"R13", "R14"} and state != "PASS")):
+                    continue
+                detail = ("Passed — no issue found" if state == "PASS" else
+                          receipt_document[0] if receipt_document and rule == "R02" else
+                          c["vendor_message"])
+                rows.append({"Result": state, "Check": c["label"], "Details": detail})
+            st.dataframe(rows, hide_index=True, width="stretch")
         track_col, another_col, _ = st.columns([1.3, 1.3, 2], vertical_alignment="center")
         with track_col:
             st.button("Track this application", key="receipt_track_current", type="primary", width="stretch",
@@ -527,7 +553,7 @@ def track_application() -> None:
         work_heading = "Application complete — Rejected"
         work_detail = "Your application has been rejected. Review the reason above and save your receipt for future reference."
     else:
-        work_heading = f"Waiting on: {vendor_owner_label(owner)}"
+        work_heading = vendor_action_heading(record, latest_run, latest_review)
         work_detail = vendor_next_step(record, latest_run, latest_review)
     st.markdown(
         '<div class="vf-work-owner" role="status">'

@@ -172,6 +172,7 @@ def test_terminal_vendor_tracking_does_not_say_waiting_on_no_one():
     assert 'work_heading = "Application complete — Rejected"' in track
     assert 'work_detail = "Your application has been approved.' in track
     assert 'work_detail = "Your application has been rejected.' in track
-    assert 'work_heading = f"Waiting on: {vendor_owner_label(owner)}"' in track
+    assert 'work_heading = vendor_action_heading(record, latest_run, latest_review)' in track
+    assert "Waiting on: " not in track
     assert 'f\'<strong>Waiting on: {escape(vendor_owner_label(owner))}' not in track
     assert 'if status != "PENDING":' in track  # final applications remain read-only

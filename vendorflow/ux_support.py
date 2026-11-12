@@ -91,6 +91,27 @@ def next_action_owner(application: dict, run: dict | None = None,
     return "Reviewer"
 
 
+def vendor_action_heading(application: dict, run: dict | None = None,
+                          review: dict | None = None) -> str:
+    """Show the vendor an actionable heading, not an internal ownership label."""
+    if active_review_request(review, run):
+        return "Next step: Make the requested correction"
+    if not run:
+        return "Next step: Resume your submission"
+    from .ui_support import vendor_document_guidance
+    document = vendor_document_guidance(run)
+    if document:
+        return "Next step: " + document[1]
+    owner = next_action_owner(application, run, review)
+    if owner == "Technical retry":
+        return "Next step: Retry the document check"
+    if owner == "Reviewer":
+        return "Your application is under review"
+    if owner == "Vendor":
+        return "Next step: Review your details"
+    return "Application complete"
+
+
 def vendor_next_step(application: dict, run: dict | None = None,
                      review: dict | None = None) -> str:
     """Plain-English instruction with no privileged duplicate-GSTIN hints."""
@@ -104,7 +125,12 @@ def vendor_next_step(application: dict, run: dict | None = None,
     if owner == "Technical retry":
         return "Document processing was interrupted. Retry the check with the same application ID or ask the reviewer for help."
     if owner == "Vendor":
-        return "Review the highlighted issues. Correct the relevant details or replace the affected PDF, then resubmit."
+        from .ui_support import vendor_document_guidance
+        document = vendor_document_guidance(run)
+        if document:
+            return ('Use "Fix and resubmit" below to upload the correct PDF. '
+                    'Your application ID will stay the same.')
+        return "Review the issues above, correct the affected details or PDF, then resubmit."
     return "Your application is waiting for staff review. No change is required unless the reviewer requests one."
 
 

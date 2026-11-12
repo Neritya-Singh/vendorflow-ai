@@ -80,7 +80,7 @@ def likely_swapped_pdf_roles(gst_pdf: ReadPDF | None, bank_pdf: ReadPDF | None) 
         return False
     gst = gst_pdf.text
     bank = bank_pdf.text
-    looks_like_bank = (re.search(r"(?im)^\s*BANK CONFIRMATION\b", gst[:500])
+    looks_like_bank = (re.search(r"(?im)^\s*BANK (?:ACCOUNT )?CONFIRMATION\b", gst[:500])
                        and re.search(r"(?im)^\s*Account number\s*:", gst))
     looks_like_gst = (re.search(r"(?im)^\s*GST REGISTRATION\b", bank[:500])
                       and re.search(r"(?im)^\s*GSTIN\s*:", bank))
