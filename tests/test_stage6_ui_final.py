@@ -162,3 +162,16 @@ def test_pdf_evidence_is_accessible_before_the_manual_decision():
     assert review.index('admin_evidence_table(') < review.index('with st.expander("Verified PDF evidence · staff only")')
     assert review.index('with st.expander("Verified PDF evidence · staff only")') < review.index('with st.container(border=True, key="vf-decision-panel")')
     assert 'repo.load_run_document(selected_id, selected_run["id"], doc_type)' in review
+
+
+# ---------- Stage 6.5: terminal-state vendor wording ----------
+
+def test_terminal_vendor_tracking_does_not_say_waiting_on_no_one():
+    track = APP[APP.index("def track_application() -> None:"):APP.index("def admin_console() -> None:")]
+    assert 'work_heading = "Application complete — Approved"' in track
+    assert 'work_heading = "Application complete — Rejected"' in track
+    assert 'work_detail = "Your application has been approved.' in track
+    assert 'work_detail = "Your application has been rejected.' in track
+    assert 'work_heading = f"Waiting on: {vendor_owner_label(owner)}"' in track
+    assert 'f\'<strong>Waiting on: {escape(vendor_owner_label(owner))}' not in track
+    assert 'if status != "PENDING":' in track  # final applications remain read-only

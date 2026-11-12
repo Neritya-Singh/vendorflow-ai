@@ -520,10 +520,19 @@ def track_application() -> None:
     latest_run = runs[0] if runs else None
     latest_review = reviews[0] if reviews else None
     owner = next_action_owner(record, latest_run, latest_review)
+    if status == "APPROVED":
+        work_heading = "Application complete — Approved"
+        work_detail = "Your application has been approved. No further action is required. Save your receipt for future reference."
+    elif status == "REJECTED":
+        work_heading = "Application complete — Rejected"
+        work_detail = "Your application has been rejected. Review the reason above and save your receipt for future reference."
+    else:
+        work_heading = f"Waiting on: {vendor_owner_label(owner)}"
+        work_detail = vendor_next_step(record, latest_run, latest_review)
     st.markdown(
         '<div class="vf-work-owner" role="status">'
-        f'<strong>Waiting on: {escape(vendor_owner_label(owner))}</strong><div>'
-        f'{escape(vendor_next_step(record, latest_run, latest_review))}</div></div>',
+        f'<strong>{escape(work_heading)}</strong><div>'
+        f'{escape(work_detail)}</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -544,7 +553,7 @@ def track_application() -> None:
                        "Date": str(r.get("created_at"))[:19]} for r in runs],
                      hide_index=True, width="stretch")
     if status != "PENDING":
-        return  # "Waiting on: no one — final decision" above already says so.
+        return  # Final decisions are read-only; the work summary above is complete.
 
     st.markdown("### Correct or retry")
     guidance = {
