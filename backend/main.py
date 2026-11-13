@@ -16,6 +16,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Literal
 
+import pymupdf
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -30,6 +31,7 @@ from vendorflow.persistence import (
 )
 from vendorflow.pipeline import MinimumIntakeError
 from vendorflow.rules import GST_STATE_CODES, normalize_submission
+from vendorflow.ux_support import committed_pdf_types
 
 from . import presenters
 from .config import Settings, load_settings
@@ -44,6 +46,7 @@ APP_ID = re.compile(r"^VF-[0-9A-F]{12}$")
 TOKEN = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
 RUN_ID = re.compile(r"^RUN-[0-9A-F]{12}$")
 MAX_REQUEST_BYTES = 2 * MAX_PDF_BYTES + 512 * 1024
+MAX_PREVIEW_PAGES = 10
 PDF_MIME = {"application/pdf", "application/x-pdf"}
 
 
@@ -375,7 +378,8 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             repo = provider.repo()
             apps = repo.admin_queue("ALL")
             run_rows = (repo.client.table("runs")
-                        .select("id,application_id,checks_json,reasons_json,elapsed_ms,created_at,finished_at,extraction_error")
+                        .select("id,application_id,trigger,status,checks_json,reasons_json,elapsed_ms,created_at,"
+                                "finished_at,extraction_error,document_manifest")
                         .limit(1000).execute().data)
             review_rows = (repo.client.table("review_actions")
                            .select("application_id,action,reason,actor,created_at,reviewed_run_id")
@@ -405,6 +409,9 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             rows = (repo.client.table("applications").select("id,current_status,payload_json,latest_run_id")
                     .eq("id", case_id).limit(1).execute().data)
             if rows and rows[0].get("latest_run_id"):
+                other_runs = repo.runs_for_application(case_id)
+                latest = next((r for r in other_runs if r.get("id") == rows[0]["latest_run_id"]), None)
+                rows[0]["_documents"] = committed_pdf_types(latest)
                 found.append(rows[0])
         return found
 
@@ -450,6 +457,48 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             "Cache-Control": "private, no-store",
             "Content-Security-Policy": "sandbox; default-src 'none'; object-src 'self'",
         })
+
+    def load_pdf(application_id: str, run_id: str, doc_type: str):
+        valid_app_id(application_id)
+        if not RUN_ID.fullmatch(run_id):
+            raise HTTPException(404, "Run not found.")
+        try:
+            pdf = provider.repo().load_run_document(application_id, run_id, doc_type)
+        except Exception as exc:
+            raise fail(exc) from None
+        if pdf is None:
+            raise HTTPException(404, "No document of this type was used in that run.")
+        return pdf
+
+    @app.get("/api/admin/applications/{application_id}/runs/{run_id}/documents/{doc_type}/pages")
+    def admin_document_pages(application_id: str, run_id: str, doc_type: Literal["GST", "BANK"],
+                             _session: dict = Depends(require_admin)):
+        """Page count for the in-app viewer (hash-verified committed document)."""
+        pdf = load_pdf(application_id, run_id, doc_type)
+        try:
+            with pymupdf.open(stream=pdf.content, filetype="pdf") as doc:
+                return {"pages": min(doc.page_count, MAX_PREVIEW_PAGES), "total_pages": doc.page_count}
+        except Exception:
+            raise HTTPException(422, "This document can't be previewed. Open the original instead.") from None
+
+    @app.get("/api/admin/applications/{application_id}/runs/{run_id}/documents/{doc_type}/pages/{page}")
+    def admin_document_page(application_id: str, run_id: str, doc_type: Literal["GST", "BANK"], page: int,
+                            _session: dict = Depends(require_admin)):
+        """One page rendered to PNG on the server, so the browser never runs a PDF
+        plugin or script from an uploaded file. Signed-in reviewers only; not cached."""
+        if not 1 <= page <= MAX_PREVIEW_PAGES:
+            raise HTTPException(404, "Page not found.")
+        pdf = load_pdf(application_id, run_id, doc_type)
+        try:
+            with pymupdf.open(stream=pdf.content, filetype="pdf") as doc:
+                if page > doc.page_count:
+                    raise HTTPException(404, "Page not found.")
+                png = doc[page - 1].get_pixmap(dpi=144).tobytes("png")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(422, "This document can't be previewed. Open the original instead.") from None
+        return Response(png, media_type="image/png", headers={"Cache-Control": "private, no-store"})
 
     @app.post("/api/admin/applications/{application_id}/review")
     def admin_review(application_id: str, body: Review, _session: dict = Depends(require_admin_csrf)):

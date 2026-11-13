@@ -9,8 +9,8 @@ const HERO: Record<HeroKey, { ring: string; band: string; icon: typeof CheckCirc
   APPROVED: { ring: "border-teal-200", band: "bg-teal-50", icon: CheckCircle2, iconColor: "text-teal-700", dot: "bg-teal-500" },
   REJECTED: { ring: "border-red-200", band: "bg-red-50", icon: XCircle, iconColor: "text-red-700", dot: "bg-red-500" },
   VENDOR: { ring: "border-amber-200", band: "bg-amber-50", icon: TriangleAlert, iconColor: "text-amber-600", dot: "bg-amber-500" },
-  TEAM: { ring: "border-navy-200", band: "bg-navy-50", icon: Users, iconColor: "text-navy-700", dot: "bg-navy-500" },
-  DRAFT: { ring: "border-slate-200", band: "bg-slate-50", icon: CircleDashed, iconColor: "text-slate-500", dot: "bg-slate-400" },
+  TEAM: { ring: "border-team-200", band: "bg-team-50", icon: Users, iconColor: "text-team-700", dot: "bg-team-500" },
+  DRAFT: { ring: "border-line", band: "bg-slate-50", icon: CircleDashed, iconColor: "text-slate-500", dot: "bg-slate-400" },
 };
 
 export function heroKey(view: Pick<VendorView, "status" | "owner">): HeroKey {
@@ -35,7 +35,7 @@ export function DecisionCard({ view }: { view: VendorView }) {
         </div>
       </div>
       {view.todo.length ? (
-        <div className="border-t border-slate-200 px-5 py-4 sm:px-6">
+        <div className="border-t border-line px-5 py-4 sm:px-6">
           <h3 className="text-[13px] font-semibold text-slate-900">
             What we need from you ({view.todo.length} {view.todo.length === 1 ? "item" : "items"})
           </h3>
@@ -51,12 +51,12 @@ export function DecisionCard({ view }: { view: VendorView }) {
           </ol>
         </div>
       ) : null}
-      <div className="border-t border-slate-200 px-5 py-4 sm:px-6">
+      <div className="border-t border-line px-5 py-4 sm:px-6">
         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">What happens next</p>
         <p className="mt-1 text-sm leading-relaxed text-slate-700">{view.next_step}</p>
       </div>
       {view.reviewer_note && view.status !== "REJECTED" ? (
-        <div className="border-t border-slate-200 px-5 py-4 sm:px-6">
+        <div className="border-t border-line px-5 py-4 sm:px-6">
           <div className="flex gap-3">
             <MessageSquareText className="mt-0.5 size-4 shrink-0 text-navy-600" aria-hidden />
             <div>

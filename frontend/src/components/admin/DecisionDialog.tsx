@@ -97,13 +97,13 @@ export function DecisionDialog({ c, action, onClose, onSaved, onUnauthorized, bu
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-slate-900/40" />
         <Dialog.Content
-          className="fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-slate-200 bg-white shadow-xl focus:outline-none"
+          className="fixed left-1/2 top-1/2 z-50 flex max-h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border border-line bg-white shadow-xl focus:outline-none"
           onOpenAutoFocus={(e) => {
             e.preventDefault();
             document.getElementById(reasonId)?.focus();
           }}
         >
-          <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
+          <div className="flex items-start justify-between gap-4 border-b border-line px-5 py-4">
             <div className="flex gap-3">
               <Icon className={cx("mt-0.5 size-5 shrink-0", action === "APPROVE" ? "text-teal-700" : action === "REJECT" ? "text-red-700" : "text-navy-700")} aria-hidden />
               <div>
@@ -155,7 +155,7 @@ export function DecisionDialog({ c, action, onClose, onSaved, onUnauthorized, bu
             {preview ? (
               <div>
                 <p className="text-[13px] font-medium text-slate-800">Message the vendor will see</p>
-                <p className="mt-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">{preview}</p>
+                <p className="mt-1.5 rounded-xl border border-line bg-slate-50 px-3 py-2 text-sm text-slate-700">{preview}</p>
                 <p className="mt-1 text-xs text-slate-500">Added to the vendor's application page. No email is sent in this demo.</p>
               </div>
             ) : null}
@@ -167,7 +167,7 @@ export function DecisionDialog({ c, action, onClose, onSaved, onUnauthorized, bu
             ) : null}
           </div>
 
-          <div className="flex items-center justify-between gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3">
+          <div className="flex items-center justify-between gap-2 border-t border-line bg-slate-50 px-5 py-3">
             <p className="text-xs text-slate-500">Saved against revision {c.revision}.</p>
             <div className="flex gap-2">
               <Dialog.Close asChild><Button variant="secondary">Cancel</Button></Dialog.Close>

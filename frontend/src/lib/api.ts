@@ -68,6 +68,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  documentPages: (id: string, runId: string, docType: string) =>
+    request<{ pages: number; total_pages: number }>(
+      `/api/admin/applications/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/documents/${docType}/pages`,
+    ),
+  documentPageUrl: (id: string, runId: string, docType: string, page: number) =>
+    `/api/admin/applications/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/documents/${docType}/pages/${page}`,
   documentUrl: (id: string, runId: string, docType: string) =>
     `/api/admin/applications/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/documents/${docType}`,
 };

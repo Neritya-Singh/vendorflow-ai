@@ -41,3 +41,16 @@ export function formatBytes(bytes: number): string {
 }
 
 export const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** "20 min", "3 hours", "2 days" since an ISO time (how long a case has waited). */
+export function formatAge(value: string | null | undefined, now: number = Date.now()): string {
+  if (!value) return "—";
+  const then = Date.parse(value);
+  if (Number.isNaN(then)) return "—";
+  const minutes = Math.max(0, Math.floor((now - then) / 60_000));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+  const days = Math.floor(hours / 24);
+  return `${days} ${days === 1 ? "day" : "days"}`;
+}

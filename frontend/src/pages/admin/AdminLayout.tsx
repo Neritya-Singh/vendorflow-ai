@@ -1,9 +1,10 @@
-import { CheckCircle2, ExternalLink, Lock, LogOut, ShieldCheck } from "lucide-react";
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
-import { Link, NavLink, Outlet } from "react-router-dom";
+import { CheckCircle2, Lock, LogOut, Plus, Search, ShieldCheck } from "lucide-react";
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { OfflineBanner } from "../../components/AppShell";
 import { Alert, Button, Card, Field, Input, Spinner, cx } from "../../components/ui";
 import { ApiError, api, setCsrf } from "../../lib/api";
+import { useAppState } from "../../state";
 
 interface AdminCtx {
   signOut: () => Promise<void>;
@@ -23,7 +24,7 @@ function Login({ onDone, configured }: { onDone: () => void; configured: boolean
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
-    <div className="flex min-h-dvh flex-col bg-slate-100">
+    <div className="flex min-h-dvh flex-col bg-canvas">
       <OfflineBanner />
       <div className="flex flex-1 items-center justify-center px-4 py-12">
         <div className="w-full max-w-sm">
@@ -76,15 +77,67 @@ function Login({ onDone, configured }: { onDone: () => void; configured: boolean
   );
 }
 
-function Tab({ to, children, end }: { to: string; children: ReactNode; end?: boolean }) {
+const NAV = [
+  { to: "/admin/overview", label: "Overview" },
+  { to: "/admin", label: "Applications", end: true, also: "/admin/cases" },
+  { to: "/admin/invites", label: "Invites" },
+  { to: "/admin/activity", label: "Activity" },
+];
+
+function TopNav() {
+  const { pathname } = useLocation();
   return (
-    <NavLink
-      to={to}
-      end={end}
-      className={({ isActive }) => cx("rounded-md px-3 py-1.5 text-sm font-medium", isActive ? "bg-white/15 text-white" : "text-navy-100 hover:bg-white/10 hover:text-white")}
-    >
-      {children}
-    </NavLink>
+    <nav aria-label="Main" className="flex gap-1 rounded-xl bg-[#F2F4F7] p-1">
+      {NAV.map((item) => (
+        <NavLink
+          key={item.to}
+          to={item.to}
+          end={item.end}
+          className={({ isActive }) => {
+            const active = isActive || (!!item.also && pathname.startsWith(item.also));
+            return cx(
+              "rounded-[9px] px-3.5 py-2 text-sm whitespace-nowrap",
+              active ? "bg-white font-semibold text-ink shadow-[0_1px_2px_rgba(16,24,40,0.08)]" : "font-medium text-[#344054] hover:text-ink",
+            );
+          }}
+        >
+          {item.label}
+        </NavLink>
+      ))}
+    </nav>
+  );
+}
+
+/** Header search: filters the Applications queue by name, ID or GSTIN ("/" focuses it there). */
+function HeaderSearch() {
+  const navigate = useNavigate();
+  const { pathname, search } = useLocation();
+  const params = new URLSearchParams(search);
+  const onQueue = pathname === "/admin" || pathname === "/admin/";
+  const value = onQueue ? params.get("q") ?? "" : "";
+  return (
+    <div className="flex h-10 min-w-[200px] flex-1 items-center gap-2 rounded-xl border border-[#D0D5DD] bg-white px-3 focus-within:border-navy-600 focus-within:ring-2 focus-within:ring-navy-600/25">
+      <Search className="size-4 shrink-0 text-muted" aria-hidden />
+      <label htmlFor="admin-search" className="sr-only">Search applications</label>
+      <input
+        id="admin-search"
+        type="search"
+        value={value}
+        placeholder="Search vendor, GSTIN or ID"
+        className="h-full min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-slate-400"
+        onChange={(e) => {
+          const next = new URLSearchParams(onQueue ? search : "");
+          if (e.target.value) next.set("q", e.target.value);
+          else next.delete("q");
+          const qs = next.toString();
+          navigate(`/admin${qs ? `?${qs}` : ""}`, { replace: onQueue });
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") e.currentTarget.blur();
+        }}
+      />
+      <kbd className="hidden rounded-md border border-line px-1.5 text-[11px] text-muted sm:inline">/</kbd>
+    </div>
   );
 }
 
@@ -130,6 +183,8 @@ export function AdminLayout() {
     return false;
   }, []);
 
+  const { meta } = useAppState();
+  const workspace = meta?.workspace_name ?? "Zamp AI";
   const [toastText, setToastText] = useState<string | null>(null);
   const toast = useCallback((text: string) => setToastText(text), []);
   useEffect(() => {
@@ -149,40 +204,32 @@ export function AdminLayout() {
 
   return (
     <Ctx.Provider value={{ signOut, onUnauthorized, toast }}>
-      <div className="flex min-h-dvh flex-col bg-slate-50">
+      <div className="flex min-h-dvh flex-col bg-canvas fit:h-dvh fit:overflow-hidden">
         <OfflineBanner />
-        <header className="sticky top-0 z-20 bg-navy-900 text-white">
-          <div className="mx-auto flex h-14 max-w-[1400px] items-center justify-between gap-4 px-4 sm:px-6">
-            <div className="flex items-center gap-5">
-              <Link to="/admin" className="flex items-center gap-2 font-semibold">
-                <ShieldCheck className="size-5 text-teal-300" aria-hidden />
-                <span>VendorFlow <span className="font-normal text-navy-200">Review</span></span>
-              </Link>
-              <nav aria-label="Staff" className="hidden items-center gap-1 sm:flex">
-                <Tab to="/admin" end>Queue</Tab>
-                <Tab to="/admin/activity">Decision history</Tab>
-              </nav>
-            </div>
+        <div className="flex min-h-0 flex-1 flex-col gap-4 p-3 sm:p-4">
+          <header className="flex flex-wrap items-center gap-x-6 gap-y-3 rounded-2xl border border-line bg-white py-2.5 pl-5 pr-4">
+            <Link to="/admin" className="flex items-center gap-2.5">
+              <span aria-hidden className="grid size-8 place-items-center rounded-[10px] bg-navy-600 text-sm font-bold text-white">V</span>
+              <span className="flex flex-col leading-tight">
+                <span className="text-[15px] font-bold text-ink">VendorFlow</span>
+                <span className="text-[11px] text-muted">{workspace} · Demo workspace</span>
+              </span>
+            </Link>
+            <TopNav />
+            <HeaderSearch />
+            <Button disabled title="Vendor invites arrive in a later release" icon={Plus}>Invite vendor</Button>
             <div className="flex items-center gap-2">
-              <Link to="/" className="hidden items-center gap-1 rounded-md px-2 py-1.5 text-[13px] text-navy-100 hover:text-white md:inline-flex">
-                Vendor portal <ExternalLink className="size-3.5" aria-hidden />
-              </Link>
-              <button type="button" onClick={signOut} className="inline-flex items-center gap-1.5 rounded-md border border-white/20 px-2.5 py-1.5 text-[13px] font-medium text-white hover:bg-white/10">
-                <LogOut className="size-3.5" aria-hidden /> Sign out
-              </button>
+              <span aria-label="Signed in as reviewer" className="grid size-9 place-items-center rounded-full bg-navy-100 text-[13px] font-semibold text-navy-800">RV</span>
+              <Button variant="ghost" size="sm" icon={LogOut} onClick={signOut}>Sign out</Button>
             </div>
-          </div>
-          <nav aria-label="Staff (mobile)" className="flex gap-1 px-4 pb-2 sm:hidden">
-            <Tab to="/admin" end>Queue</Tab>
-            <Tab to="/admin/activity">Decision history</Tab>
-          </nav>
-        </header>
-        <main id="main" className="flex-1">
-          <Outlet />
-        </main>
+          </header>
+          <main id="main" className="flex min-h-0 flex-1 flex-col">
+            <Outlet />
+          </main>
+        </div>
         <div aria-live="polite" role="status" className="pointer-events-none fixed inset-x-0 bottom-24 z-50 flex justify-center px-4">
           {toastText ? (
-            <p className="flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white shadow-lg">
+            <p className="flex items-center gap-2 rounded-xl bg-ink px-4 py-2.5 text-sm font-medium text-white shadow-raised">
               <CheckCircle2 className="size-4 text-teal-300" aria-hidden /> {toastText}
             </p>
           ) : null}

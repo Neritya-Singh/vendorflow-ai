@@ -401,3 +401,41 @@ def split_confirmation(reason: str) -> tuple[str, str | None]:
         head, tail = reason.split(marker, 1)
         return head, tail
     return reason, None
+
+
+# ---------------------------------------------------------------- B4 dashboard
+REASON_CATEGORIES = (
+    "Missing or wrong document", "Unreadable or unclear document", "Missing or invalid details",
+    "Name differs from bank holder", "Value differs from document", "Duplicate or bank reuse", "Document reading unavailable",
+)
+
+
+def reason_categories(run: dict | None) -> set[str]:
+    """Coarse, staff-only reason buckets for the dashboard's 'Top reasons'."""
+    found: set[str] = set()
+    for item in vendor_items(run):
+        key = item["key"]
+        if key == "swapped" or key.startswith("missing:"):
+            found.add("Missing or wrong document")
+        elif key.startswith("unclear:") or key == "R13" or key == "documents":
+            found.add("Unreadable or unclear document")
+        else:
+            found.add("Missing or invalid details")
+    for flag in team_flags(run):
+        rule = flag["rule_id"]
+        if rule == "R11":
+            found.add("Name differs from bank holder")
+        elif rule in {"R08", "R09", "R10"}:
+            found.add("Value differs from document")
+        elif rule in {"R12", "R15"}:
+            found.add("Duplicate or bank reuse")
+        elif rule == "R14":
+            found.add("Document reading unavailable")
+    return found
+
+
+def run_outcome_label(run: dict | None) -> str:
+    """What a single saved run decided, in reviewer wording."""
+    if (run or {}).get("status") == "APPROVED":
+        return "Approved"
+    return "Waiting on vendor" if vendor_items(run) else "Sent to team"

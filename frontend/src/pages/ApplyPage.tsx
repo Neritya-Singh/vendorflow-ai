@@ -199,7 +199,7 @@ export function ApplyPage() {
             else if (ack && draft.creds) void submit();
           }}
         >
-          <div className="border-b border-slate-200 px-5 py-4 sm:px-6">
+          <div className="border-b border-line px-5 py-4 sm:px-6">
             <h2 ref={headingRef} tabIndex={-1} className="text-[17px] font-semibold text-slate-900 focus:outline-none">
               {step === 0 ? "Business details" : step === 1 ? "Banking details and documents" : "Review and submit"}
             </h2>
@@ -220,7 +220,7 @@ export function ApplyPage() {
             {step === 1 ? (
               <div className="grid gap-7">
                 <BankSection values={fields} onChange={setFields} />
-                <div className="border-t border-slate-200 pt-6">
+                <div className="border-t border-line pt-6">
                   <h3 className="text-sm font-semibold text-slate-900">Supporting documents</h3>
                   <p className="mt-0.5 text-[13px] text-slate-500">
                     PDFs with selectable text work best. Photos or scans may not be readable and will go to a reviewer.
@@ -246,7 +246,7 @@ export function ApplyPage() {
             {step === 2 ? (
               <div className="grid gap-6">
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <section className="rounded-lg border border-slate-200 px-4 py-2">
+                  <section className="rounded-lg border border-line px-4 py-2">
                     <div className="flex items-center justify-between pt-2">
                       <h3 className="text-[13px] font-semibold text-slate-900">Business</h3>
                       <button type="button" onClick={() => goTo(0)} className="inline-flex items-center gap-1 text-[13px] font-medium text-navy-700 hover:underline">
@@ -261,7 +261,7 @@ export function ApplyPage() {
                       <KeyValue label="GSTIN" value={fields.gstin || "Not supplied"} mono />
                     </dl>
                   </section>
-                  <section className="rounded-lg border border-slate-200 px-4 py-2">
+                  <section className="rounded-lg border border-line px-4 py-2">
                     <div className="flex items-center justify-between pt-2">
                       <h3 className="text-[13px] font-semibold text-slate-900">Banking and PDFs</h3>
                       <button type="button" onClick={() => goTo(1)} className="inline-flex items-center gap-1 text-[13px] font-medium text-navy-700 hover:underline">
@@ -295,7 +295,7 @@ export function ApplyPage() {
                   <Spinner label="Preparing your application ID…" />
                 )}
 
-                <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-line bg-slate-50 px-4 py-3">
                   <input
                     type="checkbox"
                     checked={ack}
@@ -311,7 +311,7 @@ export function ApplyPage() {
             ) : null}
           </div>
 
-          <div className="flex items-center justify-between gap-3 border-t border-slate-200 bg-slate-50/60 px-5 py-4 sm:px-6">
+          <div className="flex items-center justify-between gap-3 border-t border-line bg-slate-50/60 px-5 py-4 sm:px-6">
             {step > 0 ? (
               <Button type="button" variant="secondary" icon={ArrowLeft} onClick={() => goTo(step - 1)}>Back</Button>
             ) : (

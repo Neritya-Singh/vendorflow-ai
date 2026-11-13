@@ -165,11 +165,11 @@ function CorrectionForm({ view, creds, onSaved, retryOnly }: {
             <h3 className="mb-3 text-[13px] font-semibold uppercase tracking-wide text-slate-500">Business</h3>
             <BusinessSection values={fields} onChange={(p) => setFields((f) => ({ ...f, ...p }))} errors={errors} states={meta?.states ?? []} />
           </section>
-          <section className="border-t border-slate-200 pt-6">
+          <section className="border-t border-line pt-6">
             <h3 className="mb-3 text-[13px] font-semibold uppercase tracking-wide text-slate-500">Banking</h3>
             <BankSection values={fields} onChange={(p) => setFields((f) => ({ ...f, ...p }))} />
           </section>
-          <section className="grid gap-5 border-t border-slate-200 pt-6">
+          <section className="grid gap-5 border-t border-line pt-6">
             <h3 className="text-[13px] font-semibold uppercase tracking-wide text-slate-500">Replacement documents</h3>
             <FilePicker
               label="GST registration certificate"
@@ -185,7 +185,7 @@ function CorrectionForm({ view, creds, onSaved, retryOnly }: {
             />
           </section>
         </div>
-        <div className="flex justify-end border-t border-slate-200 bg-slate-50/60 px-5 py-4">
+        <div className="flex justify-end border-t border-line bg-slate-50/60 px-5 py-4">
           <Button type="submit" size="lg" icon={Send}>{view.needs_resume ? "Submit for checking" : "Re-check"}</Button>
         </div>
       </form>

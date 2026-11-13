@@ -7,7 +7,7 @@ reviewer-only evidence.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from vendorflow.models import WorkflowResult
@@ -305,9 +305,56 @@ def admin_overview(apps: list[dict], run_rows: list[dict], review_rows: list[dic
     counts = completed_counts(submitted, [r for r in run_rows if r.get("application_id") in submitted_ids])
     tabs = {tab: sum(r["tab"] == tab for r in queue) for tab in TAB_ORDER}
     oldest = next((r for r in sorted(queue, key=lambda r: r["waiting_since"] or "") if r["tab"] == "NEEDS_REVIEW"), None)
+    submitted_runs = [r for r in run_rows if r.get("application_id") in submitted_ids]
+    first = [r for r in submitted_runs if r.get("trigger") == "submission"]
+    straight = round(100 * sum(r.get("status") == "APPROVED" for r in first) / len(first)) if first else None
+    with_docs = sorted(int(r["elapsed_ms"]) for r in submitted_runs
+                       if r.get("document_manifest") and isinstance(r.get("elapsed_ms"), (int, float)))
+    median_ms = None
+    if with_docs:
+        mid = len(with_docs) // 2
+        median_ms = with_docs[mid] if len(with_docs) % 2 else round((with_docs[mid - 1] + with_docs[mid]) / 2)
     metrics = {**counts, "needs_review": tabs["NEEDS_REVIEW"], "waiting_on_vendor": tabs["WAITING_ON_VENDOR"],
-               "oldest_needs_review": oldest["age"] if oldest else None}
-    return {"metrics": metrics, "queue": queue}
+               "oldest_needs_review": oldest["age"] if oldest else None,
+               "straight_through_rate": straight, "first_submissions": len(first),
+               "median_check_ms": median_ms, "runs_with_documents": len(with_docs)}
+    names = {a.get("id"): str((a.get("payload_json") or {}).get("legal_name") or "") for a in submitted}
+    return {"metrics": metrics, "queue": queue,
+            "top_reasons": top_reasons(submitted_runs),
+            "recent_runs": recent_runs(submitted_runs, names)}
+
+
+def _when(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def top_reasons(runs: list[dict], *, days: int = 7, now: datetime | None = None, limit: int = 5) -> dict:
+    """Runs from the last `days` days, counted once per reason bucket. Real counts only."""
+    since = (now or datetime.now(timezone.utc)) - timedelta(days=days)
+    counts: dict[str, int] = {}
+    considered = 0
+    for run in runs:
+        at = _when(run.get("created_at") or run.get("finished_at"))
+        if at is None or at < since:
+            continue
+        considered += 1
+        for bucket in v2.reason_categories(run):
+            counts[bucket] = counts.get(bucket, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], v2.REASON_CATEGORIES.index(kv[0])))[:limit]
+    return {"days": days, "runs": considered, "items": [{"reason": k, "count": v} for k, v in ranked]}
+
+
+def recent_runs(runs: list[dict], names: dict, *, limit: int = 200) -> list[dict]:
+    ordered = sorted(runs, key=lambda r: str(r.get("created_at") or ""), reverse=True)[:limit]
+    return [{"run_id": r.get("id"), "application_id": r.get("application_id"),
+             "business": names.get(r.get("application_id"), ""), "at": _iso(r.get("created_at")),
+             "trigger": "Re-check" if r.get("trigger") == "resubmission" else "Submission",
+             "result": v2.run_outcome_label(r), "status": r.get("status"), "elapsed_ms": r.get("elapsed_ms")}
+            for r in ordered]
 
 
 def _run_detail(run: dict) -> dict:
@@ -376,6 +423,7 @@ def linked_records(app: dict, run: dict | None, others: list[dict]) -> list[dict
             "application_id": other.get("id"), "business": theirs.get("legal_name") or "",
             "status": other.get("current_status"), "status_label": display_status(str(other.get("current_status") or "")),
             "match": match_types.get(str(other.get("id")), []), "comparison": rows,
+            "latest_run_id": other.get("latest_run_id"), "documents": other.get("_documents") or [],
         })
     return out
 
@@ -389,6 +437,7 @@ def admin_case(app: dict, runs: list[dict], reviews: list[dict], linked: list[di
     payload = app.get("payload_json") or {}
     return {
         "application_id": app.get("id"), "business": payload.get("legal_name") or "",
+        "gstin": str(payload.get("gstin") or "").strip().upper(),
         "status": app.get("current_status"), "status_label": display_status(str(app.get("current_status") or "")),
         "decision_source": app.get("decision_source"), "revision": int(app.get("revision") or 0),
         "latest_run_id": app.get("latest_run_id"),

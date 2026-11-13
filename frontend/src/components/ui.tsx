@@ -16,17 +16,17 @@ export const cx = (...inputs: ClassValue[]) => twMerge(clsx(inputs));
 type Variant = "primary" | "secondary" | "ghost" | "danger" | "success";
 type Size = "sm" | "md" | "lg";
 const variants: Record<Variant, string> = {
-  primary: "bg-navy-900 text-white hover:bg-navy-800 active:bg-navy-950 shadow-sm disabled:bg-navy-300",
+  primary: "bg-navy-600 text-white hover:bg-navy-700 active:bg-navy-800 disabled:bg-navy-300",
   secondary:
-    "bg-white text-slate-800 border border-slate-300 hover:bg-slate-50 hover:border-slate-400 shadow-sm disabled:text-slate-400",
+    "bg-white text-slate-700 border border-[#D0D5DD] hover:bg-slate-50 hover:border-slate-400 disabled:text-slate-400",
   ghost: "text-slate-700 hover:bg-slate-100 disabled:text-slate-400",
-  danger: "bg-red-700 text-white hover:bg-red-800 shadow-sm disabled:bg-red-300",
-  success: "bg-teal-700 text-white hover:bg-teal-800 shadow-sm disabled:bg-teal-300",
+  danger: "bg-[#B42318] text-white hover:bg-red-800 disabled:bg-red-300",
+  success: "bg-teal-700 text-white hover:bg-teal-800 disabled:bg-teal-300",
 };
 const sizes: Record<Size, string> = {
-  sm: "h-8 px-3 text-[13px] gap-1.5",
-  md: "h-10 px-4 text-sm gap-2",
-  lg: "h-11 px-5 text-[15px] gap-2",
+  sm: "h-8 px-3 text-[13px] gap-1.5 rounded-[10px]",
+  md: "h-10 px-4 text-sm gap-2 rounded-xl",
+  lg: "h-11 px-5 text-[15px] gap-2 rounded-xl",
 };
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -44,7 +44,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     <button
       ref={ref}
       className={cx(
-        "inline-flex items-center justify-center rounded-lg font-medium transition-colors disabled:cursor-not-allowed whitespace-nowrap",
+        "inline-flex items-center justify-center font-semibold transition-colors disabled:cursor-not-allowed whitespace-nowrap",
         variants[variant],
         sizes[size],
         className,
@@ -65,7 +65,7 @@ export function Card({ className, children, as: Tag = "section", ...rest }: {
   as?: "section" | "div" | "article" | "aside";
 } & Record<string, unknown>) {
   return (
-    <Tag className={cx("rounded-xl border border-slate-200 bg-white shadow-card", className)} {...rest}>
+    <Tag className={cx("rounded-2xl border border-line bg-white", className)} {...rest}>
       {children}
     </Tag>
   );
@@ -78,7 +78,7 @@ export function CardHeader({ title, description, action, className }: {
   className?: string;
 }) {
   return (
-    <div className={cx("flex flex-wrap items-start justify-between gap-3 border-b border-slate-200 px-5 py-4", className)}>
+    <div className={cx("flex flex-wrap items-start justify-between gap-3 border-b border-line-soft px-5 py-4", className)}>
       <div className="min-w-0">
         <h2 className="text-[15px] font-semibold text-slate-900">{title}</h2>
         {description ? <p className="mt-0.5 text-[13px] text-slate-500">{description}</p> : null}
@@ -90,16 +90,16 @@ export function CardHeader({ title, description, action, className }: {
 
 // ---------------------------------------------------------------- Status
 export const STATUS_STYLE: Record<Status, { badge: string; label: string; icon: LucideIcon }> = {
-  APPROVED: { badge: "bg-teal-50 text-teal-800 ring-teal-600/25", label: "Approved", icon: CheckCircle2 },
-  PENDING: { badge: "bg-amber-50 text-amber-800 ring-amber-600/30", label: "Pending Review", icon: AlertTriangle },
-  REJECTED: { badge: "bg-red-50 text-red-800 ring-red-600/25", label: "Rejected", icon: XCircle },
+  APPROVED: { badge: "bg-teal-50 text-teal-700 ring-teal-600/20", label: "Approved", icon: CheckCircle2 },
+  PENDING: { badge: "bg-amber-50 text-amber-800 ring-amber-600/25", label: "Pending", icon: AlertTriangle },
+  REJECTED: { badge: "bg-[#FEF3F2] text-[#B42318] ring-red-600/20", label: "Rejected", icon: XCircle },
 };
 
 export function StatusBadge({ status, className }: { status: Status; className?: string }) {
   const style = STATUS_STYLE[status] ?? STATUS_STYLE.PENDING;
   const Icon = style.icon;
   return (
-    <span className={cx("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset", style.badge, className)}>
+    <span className={cx("inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold ring-1 ring-inset", style.badge, className)}>
       <Icon className="size-3.5" aria-hidden />
       {style.label}
     </span>
@@ -107,13 +107,28 @@ export function StatusBadge({ status, className }: { status: Status; className?:
 }
 
 /** Reviewer-only risk tag: colour dot plus text. */
-export function RiskTag({ risk }: { risk: Risk }) {
-  if (!risk) return <span className="text-slate-400">—</span>;
-  const style = { HIGH: ["bg-red-600", "High"], MEDIUM: ["bg-amber-500", "Medium"], LOW: ["bg-slate-400", "Low"] }[risk];
+export function RiskTag({ risk, suffix = "" }: { risk: Risk; suffix?: string }) {
+  if (!risk) return <span className="text-muted">—</span>;
+  const style = {
+    HIGH: ["bg-[#FEF3F2] text-[#B42318]", "bg-[#D92D20]", "High"],
+    MEDIUM: ["bg-[#FFFAEB] text-[#93370D]", "bg-[#DC6803]", "Medium"],
+    LOW: ["bg-[#F2F4F7] text-[#344054]", "bg-[#667085]", "Low"],
+  }[risk];
   return (
-    <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-slate-800">
-      <span aria-hidden className={cx("size-2 rounded-full", style[0])} />
-      {style[1]}
+    <span className={cx("inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold", style[0])}>
+      <span aria-hidden className={cx("size-[7px] rounded-full", style[1])} />
+      {style[2]}{suffix}
+    </span>
+  );
+}
+
+/** Who acts next on a pending case, as a coloured dot + text pill. */
+export function OwnerPill({ owner, label, className }: { owner: string; label: string; className?: string }) {
+  const tone = owner === "VENDOR" ? ["bg-amber-50 text-amber-800", "bg-amber-500"] : owner === "TEAM" ? ["bg-team-50 text-team-700", "bg-team-500"] : ["bg-slate-100 text-slate-700", "bg-slate-400"];
+  return (
+    <span className={cx("inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-semibold", tone[0], className)}>
+      <span aria-hidden className={cx("size-2 rounded-full", tone[1])} />
+      {label}
     </span>
   );
 }
@@ -195,7 +210,7 @@ export function EmptyState({ icon: Icon, title, children }: { icon: LucideIcon; 
 
 // ---------------------------------------------------------------- Forms
 const controlBase =
-  "block w-full rounded-lg border bg-white px-3 text-sm text-slate-900 shadow-sm transition-colors placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-navy-600/25 disabled:bg-slate-50 disabled:text-slate-500";
+  "block w-full rounded-xl border bg-white px-3 text-sm text-ink transition-colors placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-navy-600/25 disabled:bg-slate-50 disabled:text-slate-500";
 
 export function Field({ label, hint, error, optional, children, htmlFor }: {
   label: string;
@@ -227,7 +242,7 @@ export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputE
       <input
         ref={ref}
         aria-invalid={invalid || undefined}
-        className={cx(controlBase, "h-10", invalid ? "border-red-400" : "border-slate-300 focus:border-navy-600", className)}
+        className={cx(controlBase, "h-10", invalid ? "border-red-400" : "border-[#D0D5DD] focus:border-navy-600", className)}
         {...rest}
       />
     );
@@ -238,7 +253,7 @@ export function Select({ className, invalid, children, ...rest }: SelectHTMLAttr
   return (
     <select
       aria-invalid={invalid || undefined}
-      className={cx(controlBase, "h-10 pr-8", invalid ? "border-red-400" : "border-slate-300 focus:border-navy-600", className)}
+      className={cx(controlBase, "h-10 pr-8", invalid ? "border-red-400" : "border-[#D0D5DD] focus:border-navy-600", className)}
       {...rest}
     >
       {children}
@@ -247,7 +262,7 @@ export function Select({ className, invalid, children, ...rest }: SelectHTMLAttr
 }
 
 export function Textarea({ className, ...rest }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
-  return <textarea className={cx(controlBase, "min-h-24 py-2 border-slate-300 focus:border-navy-600", className)} {...rest} />;
+  return <textarea className={cx(controlBase, "min-h-24 py-2 border-[#D0D5DD] focus:border-navy-600", className)} {...rest} />;
 }
 
 // ---------------------------------------------------------------- Copy
@@ -266,7 +281,7 @@ export function CopyValue({ label, value, secret }: { label: string; value: stri
   return (
     <div>
       <p id={id} className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</p>
-      <div className="mt-1 flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-3 pr-1.5">
+      <div className="mt-1 flex items-center gap-2 rounded-lg border border-line bg-slate-50 py-1.5 pl-3 pr-1.5">
         <code aria-labelledby={id} className={cx("min-w-0 flex-1 break-all font-mono text-[13px] text-slate-900", secret && "select-all")}>
           {value}
         </code>

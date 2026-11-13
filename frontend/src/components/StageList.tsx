@@ -85,7 +85,13 @@ export function StageList({ rows, liveStartedAt, compact, audience = "admin" }: 
               </div>
               {!compact ? (
                 <p className="mt-0.5 text-[13px] text-slate-500">
-                  {audience === "admin" && row.note && row.state !== "NOT_RUN" ? row.note : def?.description}
+                  {audience === "admin" && row.note && row.state !== "NOT_RUN"
+                    ? row.note
+                    : audience === "vendor" && row.state === "SKIPPED"
+                      ? "Not needed this time"
+                      : audience === "vendor" && row.state === "FAILED"
+                        ? "This step couldn't finish on our side"
+                        : def?.description}
                   {row.finished_at && row.state !== "NOT_RUN" ? (
                     <span className="text-slate-400"> · {formatTime(row.finished_at)}</span>
                   ) : null}

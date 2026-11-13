@@ -62,7 +62,7 @@ export function VendorShell({ children }: { children: ReactNode }) {
   return (
     <div className="flex min-h-dvh flex-col">
       <OfflineBanner />
-      <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur">
+      <header className="sticky top-0 z-20 border-b border-line bg-white">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-4 px-4 sm:px-6">
           <Logo />
           <nav aria-label="Vendor" className="flex items-center gap-1">
@@ -75,7 +75,7 @@ export function VendorShell({ children }: { children: ReactNode }) {
       <main id="main" className="flex-1" key={location.pathname}>
         {children}
       </main>
-      <footer className="border-t border-slate-200 bg-white">
+      <footer className="border-t border-line bg-white">
         <div className="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-5 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <p>VendorFlow AI · Case-study prototype for India GST-registered business vendors. Use synthetic data only.</p>
           <Link to="/admin" className="inline-flex items-center gap-1 font-medium text-slate-600 hover:text-navy-800">

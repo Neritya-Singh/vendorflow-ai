@@ -1,55 +1,128 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import {
-  ArrowLeft, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Eye, EyeOff, FileText, Keyboard, ShieldCheck, X,
-} from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowLeft, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Eye, EyeOff, FileText, Keyboard, X } from "lucide-react";
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { DECISIONS, DecisionDialog, type Decision } from "../../components/admin/DecisionDialog";
-import { MessageList } from "../../components/MessageLog";
-import { useShortcuts } from "../../lib/useShortcuts";
-import { TAB_IDS, type Tab, useOverview } from "./queueState";
+import { DocumentViewer, type ViewerDoc } from "../../components/admin/DocumentViewer";
 import { StageList } from "../../components/StageList";
-import { Alert, Button, Card, CardHeader, CheckIcon, KeyValue, Pill, RiskTag, Spinner, StatusBadge, cx } from "../../components/ui";
+import { Alert, Button, CheckIcon, OwnerPill, Pill, RiskTag, Spinner, StatusBadge, cx } from "../../components/ui";
 import { api } from "../../lib/api";
-import { formatDateTime, formatDuration } from "../../lib/format";
+import { formatAge, formatDateTime, formatDuration } from "../../lib/format";
 import type { AdminCase as Case, ComparisonRow, LinkedRecord, RunDetail } from "../../lib/types";
+import { useShortcuts } from "../../lib/useShortcuts";
 import { useAdmin } from "./AdminLayout";
+import { TAB_IDS, type Tab, useOverview } from "./queueState";
 
-function Issues({ c }: { c: Case }) {
-  const all = [...c.issues.failed, ...c.issues.unverified];
+const CASE_ID = /\bVF-[0-9A-F]{12}\b/g;
+
+/** Turns case IDs inside staff evidence text into links to those cases. */
+function Linkified({ text, tab }: { text: string; tab: Tab }) {
+  const parts: ReactNode[] = [];
+  let last = 0;
+  for (const match of text.matchAll(CASE_ID)) {
+    parts.push(text.slice(last, match.index));
+    parts.push(
+      <Link key={match.index} to={`/admin/cases/${match[0]}?tab=${tab}`} className="font-semibold text-navy-700 underline-offset-2 hover:underline">
+        {match[0]}
+      </Link>,
+    );
+    last = (match.index ?? 0) + match[0].length;
+  }
+  parts.push(text.slice(last));
+  return <>{parts}</>;
+}
+
+function Panel({ title, action, children, className, id }: { title: ReactNode; action?: ReactNode; children: ReactNode; className?: string; id: string }) {
   return (
-    <Card>
-      <CardHeader
-        title="Checks needing attention"
-        description={all.length ? `${c.issues.failed.length} need correction · ${c.issues.unverified.length} not verified` : undefined}
-      />
-      {all.length === 0 ? (
-        <p className="flex items-center gap-2 px-5 py-4 text-sm text-teal-800"><CheckCircle2 className="size-4" aria-hidden /> All automated checks passed.</p>
-      ) : (
-        <ul className="divide-y divide-slate-100">
-          {all.map((issue) => (
-            <li key={issue.rule_id} className="flex gap-3 px-5 py-3">
-              <CheckIcon state={issue.state} />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="text-sm font-medium text-slate-900">{issue.label}</p>
-                  <Pill tone={issue.state === "FAIL" ? "red" : "amber"}>{issue.state === "FAIL" ? "Correction needed" : "Not verified"}</Pill>
-                  <span className="font-mono text-[11px] text-slate-400">{issue.rule_id}</span>
-                </div>
-                <p className="mt-0.5 text-[13px] text-slate-600">{issue.note}</p>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </Card>
+    <section aria-labelledby={id} className={cx("flex flex-col gap-2.5 rounded-[20px] border border-line bg-white px-5 py-4", className)}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 id={id} className="text-[15px] font-semibold text-ink">{title}</h2>
+        {action}
+      </div>
+      {children}
+    </section>
   );
 }
 
-function Comparison({ c }: { c: Case }) {
+// ---------------------------------------------------------------- left column
+
+function WhyItsHere({ c, tab }: { c: Case; tab: Tab }) {
+  const top = c.flags[0];
+  const evidence = top ? c.checks.find((ch) => ch.rule_id === top.rule_id)?.evidence : undefined;
+  const vendorSaw = c.messages[0]?.text;
+  const tone = c.status === "APPROVED" ? "border-teal-200 bg-teal-50" : c.status === "REJECTED" ? "border-red-200 bg-[#FEF3F2]" : "border-[#FEDF89] bg-[#FFFAEB]";
+  return (
+    <section aria-labelledby="why-h" className={cx("flex flex-col gap-2 rounded-[20px] border px-5 py-4", tone)}>
+      <h2 id="why-h" className="text-[13px] font-semibold uppercase tracking-[0.04em] text-[#93370D]">
+        {c.status === "PENDING" ? "Why it's here" : "Decision"}
+      </h2>
+      {c.status !== "PENDING" ? (
+        <ul className="space-y-1 text-[15px] text-ink">{c.reasons.map((r) => <li key={r}>{r}</li>)}</ul>
+      ) : (
+        <>
+          <p className="text-[15px] font-semibold leading-snug text-ink">{c.primary_issue}</p>
+          {evidence ? <p className="text-[15px] leading-relaxed text-ink"><Linkified text={evidence} tab={tab} /></p> : null}
+          {c.flags.length > 1 ? <p className="text-[13px] text-[#93370D]">Also flagged: {c.flags.slice(1).map((f) => f.reason).join(" · ")}</p> : null}
+          {c.owner === "VENDOR" && c.vendor_items.length ? (
+            <div className="text-[13px] text-ink">
+              <p className="font-medium">The vendor was asked to:</p>
+              <ul className="mt-0.5 list-disc pl-5">{c.vendor_items.map((i) => <li key={i.text}>{i.text}</li>)}</ul>
+            </div>
+          ) : null}
+          {vendorSaw ? <p className="text-[13px] text-[#93370D]">The vendor was shown: “{vendorSaw}”</p> : null}
+        </>
+      )}
+    </section>
+  );
+}
+
+function LinkedRecordPanel({ record, tab }: { record: LinkedRecord; tab: Tab }) {
+  return (
+    <Panel
+      id={`linked-${record.application_id}`}
+      title={
+        <span className="inline-flex flex-wrap items-center gap-2">
+          Linked record
+          <Link to={`/admin/cases/${record.application_id}?tab=${tab}`} className="text-[13px] font-semibold text-navy-700 hover:underline">
+            Open {record.application_id}
+          </Link>
+          <StatusBadge status={record.status} />
+        </span>
+      }
+    >
+      <p className="-mt-1 text-xs text-muted">{record.match.join(" · ")} — {record.business || "Unnamed business"}</p>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[420px] border-collapse text-sm tabular">
+          <thead className="text-left text-xs text-muted">
+            <tr>
+              <th scope="col" className="py-1.5 font-semibold">Field</th>
+              <th scope="col" className="px-2 py-1.5 font-semibold">This application</th>
+              <th scope="col" className="py-1.5 font-semibold">{record.status_label} {record.application_id}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {record.comparison.map((row) => (
+              <tr key={row.field} className={cx("border-t border-[#F2F4F7]", !row.same && "bg-[#FEF3F2]")}>
+                <th scope="row" className={cx("py-2 text-left", row.same ? "font-medium text-[#344054]" : "pl-2 font-semibold text-[#B42318]")}>{row.field}</th>
+                <td className={cx("px-2 py-2", !row.same && "font-semibold")}>{row.this}</td>
+                <td className="py-2">
+                  {row.other}{" "}
+                  {row.same ? <span className="text-teal-700" aria-label="Same">✓</span> : <span className="text-xs font-semibold text-[#B42318]">Differs</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+  );
+}
+
+function ComparedValues({ c }: { c: Case }) {
   const { onUnauthorized } = useAdmin();
   const [revealed, setRevealed] = useState<ComparisonRow[] | null>(null);
   const [busy, setBusy] = useState(false);
+  if (!c.comparison.length) return null;
   const toggle = async () => {
     if (revealed) return setRevealed(null);
     setBusy(true);
@@ -61,38 +134,36 @@ function Comparison({ c }: { c: Case }) {
       setBusy(false);
     }
   };
-  if (!c.comparison.length) return null;
   return (
-    <Card>
-      <CardHeader
-        title="Submitted vs. PDF evidence"
-        description="From the latest saved run. Sensitive identifiers are masked by default."
-        action={
-          <Button size="sm" variant="secondary" icon={revealed ? EyeOff : Eye} loading={busy} onClick={toggle}>
-            {revealed ? "Mask values" : "Show full values"}
-          </Button>
-        }
-      />
+    <Panel
+      id="cmp-h"
+      title="Compared values"
+      action={
+        <Button size="sm" variant="ghost" icon={revealed ? EyeOff : Eye} loading={busy} onClick={toggle}>
+          {revealed ? "Mask" : "Show full values"}
+        </Button>
+      }
+    >
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[560px] text-left text-sm">
-          <thead className="bg-slate-50 text-xs font-medium text-slate-500">
+        <table className="w-full min-w-[420px] border-collapse text-sm tabular">
+          <thead className="text-left text-xs text-muted">
             <tr>
-              <th scope="col" className="px-5 py-2">Field</th>
-              <th scope="col" className="px-3 py-2">Submitted by vendor</th>
-              <th scope="col" className="px-3 py-2">Found in PDF</th>
-              <th scope="col" className="px-5 py-2 text-right">Comparison</th>
+              <th scope="col" className="py-1.5 font-semibold">Field</th>
+              <th scope="col" className="px-2 py-1.5 font-semibold">Submitted</th>
+              <th scope="col" className="py-1.5 font-semibold">In the document</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-slate-100">
+          <tbody>
             {c.comparison.map((row, i) => {
               const shown = revealed?.[i] ?? row;
+              const bad = row.Kind === "flag";
               return (
-                <tr key={row.Field} className={cx(row.Kind === "flag" && "bg-red-50/40", row.Kind === "missing" && "bg-amber-50/40")}>
-                  <th scope="row" className="px-5 py-2.5 font-medium text-slate-700">{row.Field.replace(" (masked)", "")}</th>
-                  <td className="px-3 py-2.5 font-mono text-[13px] text-slate-900">{shown.Submitted}</td>
-                  <td className="px-3 py-2.5 font-mono text-[13px] text-slate-900">{shown["From PDF"]}</td>
-                  <td className="px-5 py-2.5 text-right">
-                    <Pill tone={row.Kind === "ok" ? "teal" : row.Kind === "flag" ? "red" : "amber"}>{row.Assessment}</Pill>
+                <tr key={row.Field} className={cx("border-t border-[#F2F4F7]", bad && "bg-[#FEF3F2]", row.Kind === "missing" && "bg-[#FFFAEB]")}>
+                  <th scope="row" className={cx("py-2 text-left", bad ? "pl-2 font-semibold text-[#B42318]" : "font-medium text-[#344054]")}>{row.Field.replace(" (masked)", "")}</th>
+                  <td className="px-2 py-2">{shown.Submitted}</td>
+                  <td className="py-2">
+                    {shown["From PDF"]}{" "}
+                    {row.Kind === "ok" ? <span className="text-teal-700" aria-label="Consistent">✓</span> : <span className="text-xs font-semibold text-[#B42318]">{row.Assessment}</span>}
                   </td>
                 </tr>
               );
@@ -100,119 +171,121 @@ function Comparison({ c }: { c: Case }) {
           </tbody>
         </table>
       </div>
-      <p className="border-t border-slate-100 px-5 py-2.5 text-xs text-slate-500">
-        “Consistent” means the two sources agree. It does not verify a real GST registration or bank-account ownership.
-      </p>
-    </Card>
+      <p className="text-xs text-muted">“✓” means the two sources agree. It is not a GST registry or bank-ownership verification.</p>
+    </Panel>
   );
 }
 
-function RunCard({ run, appId, open, onToggle, latest }: { run: RunDetail; appId: string; open: boolean; onToggle: () => void; latest: boolean }) {
-  return (
-    <li className="border-b border-slate-100 last:border-0">
-      <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-center gap-3 px-5 py-3 text-left hover:bg-slate-50">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm font-medium text-slate-900">{run.trigger === "submission" ? "Initial submission" : "Resubmission"}</p>
-            <StatusBadge status={run.status} />
-            {latest ? <Pill tone="navy">Latest</Pill> : null}
-            {run.extraction_error ? <Pill tone="amber">Extraction failed</Pill> : null}
-          </div>
-          <p className="mt-0.5 text-xs text-slate-500">
-            <span className="font-mono">{run.id}</span> · {formatDateTime(run.created_at)} · {formatDuration(run.elapsed_ms)}
-          </p>
-        </div>
-        <ChevronDown className={cx("size-4 text-slate-400 transition-transform", open && "rotate-180")} aria-hidden />
-      </button>
-      {open ? (
-        <div className="grid gap-5 px-5 pb-5 md:grid-cols-[1.2fr_1fr]">
-          <div>
-            <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Saved stage events</p>
-            <StageList rows={run.stages} />
-          </div>
-          <div className="grid content-start gap-4">
-            <div>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Exact PDFs evaluated</p>
-              {run.documents.length ? (
-                <ul className="grid gap-2">
-                  {run.documents.map((d) => (
-                    <li key={d.doc_type} className="flex items-center gap-3 rounded-lg border border-slate-200 px-3 py-2">
-                      <FileText className="size-4 text-slate-400" aria-hidden />
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-slate-900">{d.doc_type === "GST" ? "GST certificate" : "Bank proof"} · v{d.version}</p>
-                        <p className="truncate font-mono text-[11px] text-slate-500">sha256 {d.sha256_prefix}…</p>
-                      </div>
-                      <a
-                        href={api.documentUrl(appId, run.id, d.doc_type)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-[13px] font-medium text-navy-700 hover:underline"
-                      >
-                        Open
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-[13px] text-slate-500">No PDFs were attached to this run.</p>
-              )}
-            </div>
-            <div>
-              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">Automated reasons</p>
-              <ul className="list-disc space-y-1 pl-4 text-[13px] text-slate-700">
-                {run.reasons.map((r) => <li key={r}>{r}</li>)}
-              </ul>
-            </div>
-          </div>
-        </div>
-      ) : null}
-    </li>
-  );
-}
+type HistoryItem =
+  | { kind: "run"; at: string | null; run: RunDetail }
+  | { kind: "message"; at: string | null; title: string; text: string; source: string }
+  | { kind: "review"; at: string | null; label: string; reason: string; confirmation: string | null; actor: string };
 
-/** Staff-only: the existing application this case matches, values side by side. */
-function LinkedRecordCard({ record }: { record: LinkedRecord }) {
+function RunDetails({ run, appId }: { run: RunDetail; appId: string }) {
   return (
-    <Card className="border-red-200">
-      <CardHeader
-        title={
-          <span className="inline-flex flex-wrap items-center gap-2">
-            Linked record
-            <Link to={`/admin/cases/${record.application_id}`} className="font-mono text-[13px] font-medium text-navy-700 hover:underline">
-              Open {record.application_id}
-            </Link>
-            <StatusBadge status={record.status} />
-          </span>
-        }
-        description={`${record.match.join(" · ")} — ${record.business || "Unnamed business"}`}
-      />
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[520px] text-left text-sm">
-          <thead className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500">
-            <tr>
-              <th scope="col" className="px-4 py-2">Field</th>
-              <th scope="col" className="px-4 py-2">This application</th>
-              <th scope="col" className="px-4 py-2">{record.application_id}</th>
-              <th scope="col" className="px-4 py-2"><span className="sr-only">Match</span></th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {record.comparison.map((row) => (
-              <tr key={row.field} className={row.same ? undefined : "bg-amber-50/60"}>
-                <th scope="row" className="px-4 py-2 font-normal text-slate-600">{row.field}</th>
-                <td className="px-4 py-2 font-mono text-[13px] text-slate-900">{row.this}</td>
-                <td className="px-4 py-2 font-mono text-[13px] text-slate-900">{row.other}</td>
-                <td className="px-4 py-2 text-xs font-medium">
-                  {row.same ? <span className="text-teal-700">Same</span> : <span className="text-amber-800">Differs</span>}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+    <div className="mt-2 grid gap-4 rounded-xl border border-line-soft bg-[#F9FAFB] p-3 md:grid-cols-[1.2fr_1fr]">
+      <StageList rows={run.stages} compact />
+      <div className="grid content-start gap-2">
+        <p className="text-xs font-semibold uppercase tracking-wide text-muted">Exact documents used</p>
+        {run.documents.length ? (
+          run.documents.map((d) => (
+            <a key={d.doc_type} href={api.documentUrl(appId, run.id, d.doc_type)} target="_blank" rel="noopener noreferrer"
+              className="flex items-center gap-2 rounded-lg border border-line bg-white px-2.5 py-1.5 text-[13px] hover:border-navy-300">
+              <FileText className="size-4 text-muted" aria-hidden />
+              <span className="flex-1">{d.doc_type === "GST" ? "GST certificate" : "Bank proof"} · v{d.version}</span>
+              <span className="font-mono text-[11px] text-muted">{d.sha256_prefix.slice(0, 8)}…</span>
+            </a>
+          ))
+        ) : (
+          <p className="text-[13px] text-muted">No documents attached.</p>
+        )}
       </div>
-    </Card>
+    </div>
   );
 }
+
+function ChecksAndHistory({ c, className }: { c: Case; className?: string }) {
+  const [showAll, setShowAll] = useState(false);
+  const [openRun, setOpenRun] = useState<string | null>(null);
+  const attention = c.checks.filter((ch) => ch.state !== "PASS");
+  const passed = c.checks.length - attention.length;
+  const history = useMemo<HistoryItem[]>(() => {
+    const items: HistoryItem[] = [
+      ...c.runs.map((run) => ({ kind: "run" as const, at: run.created_at, run })),
+      ...c.messages.map((m) => ({ kind: "message" as const, at: m.at, title: m.title, text: m.text, source: m.source })),
+      ...c.reviews.map((r) => ({ kind: "review" as const, at: r.created_at, label: r.label, reason: r.reason, confirmation: r.confirmation, actor: r.actor })),
+    ];
+    // Newest first; at equal times show the action, then its message, then the run.
+    const order = { review: 0, message: 1, run: 2 };
+    return items.sort((a, b) => (b.at ?? "").localeCompare(a.at ?? "") || order[a.kind] - order[b.kind]);
+  }, [c]);
+
+  return (
+    <Panel
+      id="hist-h"
+      title="Checks and history"
+      className={cx("min-h-[240px]", className)}
+      action={
+        c.checks.length ? (
+          <button type="button" className="text-[13px] font-semibold text-navy-700 hover:underline" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
+            {showAll ? "Hide passed checks" : `Show all ${c.checks.length} checks`}
+          </button>
+        ) : null
+      }
+    >
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
+        {(showAll ? c.checks : attention).length ? (
+          <ul className="grid gap-2">
+            {(showAll ? c.checks : attention).map((ch) => (
+              <li key={ch.rule_id} className="flex gap-2.5 text-[13px]">
+                <CheckIcon state={ch.state} />
+                <div className="min-w-0">
+                  <p className="font-medium text-ink">{ch.label} <span className="font-mono text-[11px] font-normal text-muted">{ch.rule_id}</span></p>
+                  {ch.state !== "PASS" || showAll ? <p className="text-muted">{ch.evidence}</p> : null}
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {!showAll && passed ? (
+          <p className="flex items-center gap-2 text-sm text-teal-700">
+            <CheckCircle2 className="size-4" aria-hidden />
+            {attention.length ? `${passed} other checks passed` : `All ${passed} checks passed`}
+          </p>
+        ) : null}
+        <ol className="grid gap-2 border-t border-line-soft pt-3 text-[13px] text-[#344054]" aria-label="History">
+          {history.map((item, i) => (
+            <li key={`${item.kind}-${item.at}-${i}`} className="grid grid-cols-[112px_1fr] gap-2.5">
+              <span className="text-muted tabular">{formatDateTime(item.at).replace(/ \d{4},/, ",").replace(" IST", "")}</span>
+              <div className="min-w-0">
+                {item.kind === "run" ? (
+                  <>
+                    <button type="button" className="inline-flex items-center gap-1 text-left hover:text-ink" aria-expanded={openRun === item.run.id}
+                      onClick={() => setOpenRun((o) => (o === item.run.id ? null : item.run.id))}>
+                      {item.run.trigger === "submission" ? "Automated check" : "Re-check after changes"} · {formatDuration(item.run.elapsed_ms)} ·{" "}
+                      {item.run.status === "APPROVED" ? "approved" : item.run.extraction_error ? "reading unavailable" : "pending"}
+                      <ChevronDown className={cx("size-3.5 text-muted", openRun === item.run.id && "rotate-180")} aria-hidden />
+                    </button>
+                    {openRun === item.run.id ? <RunDetails run={item.run} appId={c.application_id} /> : null}
+                  </>
+                ) : item.kind === "message" ? (
+                  <span>Message added for vendor: <span className="text-ink">{item.title}</span> <span className="text-muted">(application page, no email)</span></span>
+                ) : (
+                  <span>
+                    <span className="font-medium text-ink">{item.label}</span> · “{item.reason}”
+                    {item.confirmation ? <span className="block text-xs text-teal-700">✓ {item.confirmation}</span> : null}
+                  </span>
+                )}
+              </div>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </Panel>
+  );
+}
+
+// ---------------------------------------------------------------- shortcuts
 
 const CASE_SHORTCUTS: [string, string][] = [
   ["A", "Approve"], ["C", "Request correction"], ["R", "Reject"], ["?", "Show this list"], ["Esc", "Close a dialog"],
@@ -223,18 +296,18 @@ function ShortcutHelp({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-slate-900/40" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-slate-200 bg-white p-5 shadow-xl focus:outline-none">
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-line bg-white p-5 shadow-raised focus:outline-none">
           <div className="flex items-start justify-between">
-            <Dialog.Title className="text-base font-semibold text-slate-900">Keyboard shortcuts</Dialog.Title>
-            <Dialog.Close className="rounded-md p-1 text-slate-500 hover:bg-slate-100" aria-label="Close"><X className="size-4" aria-hidden /></Dialog.Close>
+            <Dialog.Title className="text-base font-semibold text-ink">Keyboard shortcuts</Dialog.Title>
+            <Dialog.Close className="rounded-md p-1 text-muted hover:bg-slate-100" aria-label="Close"><X className="size-4" aria-hidden /></Dialog.Close>
           </div>
-          <Dialog.Description className="mt-1 text-[13px] text-slate-500">Shortcuts are off while you type in a field.</Dialog.Description>
+          <Dialog.Description className="mt-1 text-[13px] text-muted">Shortcuts are off while you type in a field.</Dialog.Description>
           <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
             {CASE_SHORTCUTS.map(([key, label]) => (
-              <div key={key} className="contents">
-                <dt><kbd className="rounded-md border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">{key}</kbd></dt>
-                <dd className="text-slate-700">{label}</dd>
-              </div>
+              <Fragment key={key}>
+                <dt><kbd className="rounded-md border border-line bg-[#F9FAFB] px-1.5 py-0.5 text-xs">{key}</kbd></dt>
+                <dd className="text-[#344054]">{label}</dd>
+              </Fragment>
             ))}
           </dl>
         </Dialog.Content>
@@ -242,6 +315,8 @@ function ShortcutHelp({ open, onOpenChange }: { open: boolean; onOpenChange: (o:
     </Dialog.Root>
   );
 }
+
+// ---------------------------------------------------------------- page
 
 export function AdminCase() {
   const { id = "" } = useParams();
@@ -252,7 +327,6 @@ export function AdminCase() {
   const tab: Tab = requested && TAB_IDS.includes(requested) ? requested : "NEEDS_REVIEW";
   const [c, setC] = useState<Case | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [openRun, setOpenRun] = useState<string | null>(null);
   const [action, setAction] = useState<Decision | null>(null);
   const [help, setHelp] = useState(false);
   const { data: overview } = useOverview();
@@ -260,13 +334,9 @@ export function AdminCase() {
   const load = useCallback(() => {
     setC(null);
     setError(null);
-    setOpenRun(null);
     api
       .adminCase(id)
-      .then((data) => {
-        setC(data);
-        setOpenRun((r) => r ?? data.runs[0]?.id ?? null);
-      })
+      .then(setC)
       .catch((e: Error) => {
         if (!onUnauthorized(e)) setError(e.message);
       });
@@ -289,6 +359,20 @@ export function AdminCase() {
   };
   useShortcuts({ a: () => open("APPROVE"), c: () => open("REQUEST_CORRECTION"), r: () => open("REJECT"), "?": () => setHelp(true) }, !!c);
 
+  const docs = useMemo<ViewerDoc[]>(() => {
+    if (!c) return [];
+    const latest = c.runs[0];
+    const own: ViewerDoc[] = (latest?.pdf_types ?? []).map((t) => ({
+      key: `own-${t}`, label: t === "GST" ? "GST certificate" : "Bank proof", applicationId: c.application_id, runId: latest.id, docType: t,
+    }));
+    const linked: ViewerDoc[] = c.linked_records.flatMap((r) =>
+      r.latest_run_id && r.documents.includes("BANK")
+        ? [{ key: `linked-${r.application_id}`, label: `${r.application_id} bank proof`, applicationId: r.application_id, runId: r.latest_run_id, docType: "BANK" as const }]
+        : [],
+    );
+    return [...own, ...linked];
+  }, [c]);
+
   const onSaved = async (saved: Case) => {
     setAction(null);
     setC(saved);
@@ -305,7 +389,7 @@ export function AdminCase() {
 
   if (error) {
     return (
-      <div className="mx-auto max-w-3xl px-4 py-8">
+      <div className="mx-auto max-w-3xl py-8">
         <Alert tone="error" title="Case unavailable">{error}</Alert>
         <Link to={queueUrl} className="mt-4 inline-block text-sm font-medium text-navy-700 hover:underline">← Back to applications</Link>
       </div>
@@ -313,173 +397,75 @@ export function AdminCase() {
   }
   if (!c) return <div className="p-8"><Spinner label="Loading case…" /></div>;
 
-  const latestRun = c.runs[0];
+  const linkedIds = c.linked_records.map((r) => r.application_id).join(", ");
   return (
-    <div className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <Link to={queueUrl} className="inline-flex items-center gap-1 text-[13px] font-medium text-slate-600 hover:text-navy-800">
-          <ArrowLeft className="size-3.5" aria-hidden /> Applications
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      {/* Header card */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-2xl border border-line bg-white px-4 py-3">
+        <Link to={queueUrl} className="inline-flex items-center gap-1.5 rounded-[10px] border border-[#D0D5DD] px-3 py-2 text-sm font-medium text-[#344054] hover:bg-slate-50">
+          <ArrowLeft className="size-4" aria-hidden /> Queue
         </Link>
-        <div className="flex items-center gap-2">
-          {index >= 0 ? <span className="text-[13px] text-slate-500 tabular">{index + 1} of {list.length}</span> : null}
-          <Button size="sm" variant="secondary" icon={ChevronLeft} disabled={!prevId} onClick={() => prevId && navigate(caseUrl(prevId))}>Prev</Button>
-          <Button size="sm" variant="secondary" disabled={!nextId} onClick={() => nextId && navigate(caseUrl(nextId))}>
-            Next <ChevronRight className="size-4" aria-hidden />
-          </Button>
-          <Button size="sm" variant="ghost" icon={Keyboard} onClick={() => setHelp(true)} aria-label="Keyboard shortcuts">?</Button>
-        </div>
-      </div>
-      <div className="mt-2 flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="text-xl font-semibold tracking-tight text-slate-900">{c.business || "Unnamed business"}</h1>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-[13px] text-slate-500">
-            <span className="font-mono text-slate-700">{c.application_id}</span>
-            <StatusBadge status={c.status} />
-            {c.status === "PENDING" ? <Pill tone={c.owner === "VENDOR" ? "amber" : "navy"}>{c.owner_label}</Pill> : null}
-            {c.risk && c.status === "PENDING" ? <RiskTag risk={c.risk} /> : null}
-            {c.decision_source === "MANUAL" ? <Pill>Reviewer decision</Pill> : <Pill>Automated decision</Pill>}
-            <span>Revision {c.revision}</span>
-            <span>· Submitted {formatDateTime(c.created_at)}</span>
-          </div>
+          <h1 className="text-xl font-bold text-ink">{c.business || "Unnamed business"}</h1>
+          <p className="text-xs text-muted tabular">
+            {c.application_id}{c.gstin ? ` · GSTIN ${c.gstin}` : ""}{c.contact.state ? ` · ${c.contact.state}` : ""} · Submitted {formatDateTime(c.created_at)}
+          </p>
         </div>
+        {c.status === "PENDING" ? <OwnerPill owner={c.owner} label={c.owner === "TEAM" ? "With our team" : c.owner_label} className="text-[13px]" /> : <StatusBadge status={c.status} />}
+        {c.status === "PENDING" && c.risk ? <RiskTag risk={c.risk} suffix=" risk" /> : null}
+        {c.status === "PENDING" ? <span className="text-[13px] text-muted">Waiting {formatAge(c.updated_at)}</span> : null}
+        {c.decision_source === "MANUAL" ? <Pill>Reviewer decision</Pill> : null}
+        <div className="flex-1" />
+        {index >= 0 ? <span className="text-[13px] text-muted tabular">{index + 1} of {list.length}</span> : null}
+        <button type="button" aria-label="Previous case" disabled={!prevId} onClick={() => prevId && navigate(caseUrl(prevId))}
+          className="grid size-10 place-items-center rounded-[10px] border border-[#D0D5DD] bg-white disabled:opacity-40">
+          <ChevronLeft className="size-4" aria-hidden />
+        </button>
+        <button type="button" aria-label="Next case" disabled={!nextId} onClick={() => nextId && navigate(caseUrl(nextId))}
+          className="grid size-10 place-items-center rounded-[10px] border border-[#D0D5DD] bg-white disabled:opacity-40">
+          <ChevronRight className="size-4" aria-hidden />
+        </button>
+        <button type="button" aria-label="Keyboard shortcuts" onClick={() => setHelp(true)}
+          className="grid size-10 place-items-center rounded-[10px] border border-[#D0D5DD] bg-white text-muted">
+          <Keyboard className="size-4" aria-hidden />
+        </button>
       </div>
 
+      {/* Evidence (left) + documents (right) */}
+      <div className="grid gap-3 fit:min-h-0 fit:flex-1 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
+        <div className="flex flex-col gap-3 fit:min-h-0 fit:overflow-y-auto">
+          <WhyItsHere c={c} tab={tab} />
+          {c.linked_records.map((r) => <LinkedRecordPanel key={r.application_id} record={r} tab={tab} />)}
+          <ComparedValues c={c} />
+          <ChecksAndHistory c={c} className="fit:min-h-[240px] fit:flex-1" />
+        </div>
+        <DocumentViewer key={c.application_id} docs={docs} onUnauthorized={onUnauthorized} className="min-h-[560px] fit:min-h-0" />
+      </div>
 
-      <Card className={cx("mt-4 px-5 py-4", c.status === "PENDING" ? "border-amber-200 bg-amber-50/50" : c.status === "APPROVED" ? "border-teal-200 bg-teal-50/50" : "border-red-200 bg-red-50/50")}>
-        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-          {c.status === "PENDING" ? "Why it's here" : "Decision basis"}
-        </p>
-        {c.status === "PENDING" ? (
+      {/* Action bar: always visible */}
+      <footer className="sticky bottom-0 z-10 flex flex-wrap items-center gap-3 rounded-2xl border border-line bg-white px-4 py-3">
+        <span className="min-w-[240px] flex-1 text-[13px] text-muted">
+          {!c.can_review
+            ? c.status === "PENDING" ? "A decision is possible once a completed check exists." : "Final decision recorded. This case is read-only."
+            : c.requires_confirmation
+              ? `Approving this case needs a bank-change confirmation: a call-back to the contact on ${linkedIds || "the existing record"}.`
+              : c.owner === "VENDOR" ? "Waiting on the vendor. You can still decide now if the evidence is enough." : "Each decision needs a reason. The vendor gets a message on their application page."}
+        </span>
+        {c.can_review ? (
           <>
-            <p className="mt-1 text-[15px] font-semibold text-slate-900">{c.primary_issue}</p>
-            {c.flags.length > 1 ? (
-              <ul className="mt-1.5 space-y-0.5 text-[13px] text-slate-700">
-                {c.flags.slice(1).map((f) => <li key={f.rule_id}>Also: {f.reason}</li>)}
-              </ul>
-            ) : null}
-            {c.owner === "VENDOR" && c.vendor_items.length ? (
-              <div className="mt-2 text-[13px] text-slate-700">
-                <p className="font-medium text-slate-800">The vendor was asked to:</p>
-                <ul className="mt-0.5 list-disc pl-5">{c.vendor_items.map((i) => <li key={i.text}>{i.text}</li>)}</ul>
-              </div>
-            ) : null}
+            <button type="button" onClick={() => open("APPROVE")} className="rounded-xl border border-[#D0D5DD] bg-white px-[18px] py-2.5 text-sm font-semibold text-[#344054] hover:bg-slate-50">
+              Approve <kbd className="ml-1.5 rounded-[5px] border border-[#D0D5DD] px-1.5 text-[11px] text-muted">{DECISIONS.APPROVE.key}</kbd>
+            </button>
+            <button type="button" onClick={() => open("REQUEST_CORRECTION")} className="rounded-xl bg-navy-50 px-[18px] py-2.5 text-sm font-semibold text-navy-600 hover:bg-navy-100">
+              Request correction <kbd className="ml-1.5 rounded-[5px] border border-navy-200 px-1.5 text-[11px]">{DECISIONS.REQUEST_CORRECTION.key}</kbd>
+            </button>
+            <button type="button" onClick={() => open("REJECT")} className="rounded-xl bg-[#B42318] px-[18px] py-2.5 text-sm font-semibold text-white hover:bg-red-800">
+              Reject <kbd className="ml-1.5 rounded-[5px] border border-white/50 px-1.5 text-[11px]">{DECISIONS.REJECT.key}</kbd>
+            </button>
           </>
-        ) : (
-          <ul className="mt-1.5 space-y-1 text-sm text-slate-800">
-            {c.reasons.map((r) => <li key={r}>{r}</li>)}
-          </ul>
-        )}
-        {c.active_correction_request ? <p className="mt-2 text-[13px] font-medium text-navy-800">Correction requested — waiting for the vendor to resubmit.</p> : null}
-      </Card>
+        ) : null}
+      </footer>
 
-      <div className="mt-5 grid items-start gap-5 lg:grid-cols-[1fr_380px]">
-        <div className="grid min-w-0 gap-5">
-          {c.linked_records.map((r) => <LinkedRecordCard key={r.application_id} record={r} />)}
-          {latestRun ? (
-            <>
-              <Issues c={c} />
-              <Comparison c={c} />
-            </>
-          ) : (
-            <Alert tone="warning" title="No completed check">The vendor's first submission was interrupted. They must resume it before a decision is possible.</Alert>
-          )}
-          {c.runs.length ? (
-            <Card>
-              <CardHeader title="Run history" description={`${c.runs.length} saved ${c.runs.length === 1 ? "evaluation" : "evaluations"} with the exact PDF versions used`} />
-              <ul>
-                {c.runs.map((run, i) => (
-                  <RunCard key={run.id} run={run} appId={c.application_id} latest={i === 0} open={openRun === run.id} onToggle={() => setOpenRun((o) => (o === run.id ? null : run.id))} />
-                ))}
-              </ul>
-            </Card>
-          ) : null}
-          {c.checks.length ? (
-            <details className="group rounded-xl border border-slate-200 bg-white shadow-card">
-              <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 text-[15px] font-semibold text-slate-900">
-                All rule results ({c.checks.length})
-                <ChevronDown className="size-4 text-slate-400 transition-transform group-open:rotate-180" aria-hidden />
-              </summary>
-              <div className="overflow-x-auto border-t border-slate-200">
-                <table className="w-full min-w-[560px] text-left text-sm">
-                  <tbody className="divide-y divide-slate-100">
-                    {c.checks.map((ch) => (
-                      <tr key={ch.rule_id}>
-                        <td className="w-14 px-5 py-2.5 font-mono text-xs text-slate-500">{ch.rule_id}</td>
-                        <td className="px-2 py-2.5"><span className="inline-flex items-center gap-2 font-medium text-slate-800"><CheckIcon state={ch.state} />{ch.label}</span></td>
-                        <td className="px-5 py-2.5 text-[13px] text-slate-600">{ch.evidence}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-          ) : null}
-        </div>
-
-        <aside className="grid gap-5 lg:sticky lg:top-20">
-          {c.can_review ? (
-            <Card>
-              <CardHeader title="Decide" description="Each decision needs a reason. The vendor gets a message on their application page." />
-              <div className="grid gap-2 px-5 py-4">
-                {(["APPROVE", "REQUEST_CORRECTION", "REJECT"] as Decision[]).map((d) => {
-                  const def = DECISIONS[d];
-                  return (
-                    <Button key={d} variant={d === "REQUEST_CORRECTION" ? "secondary" : def.variant} icon={def.icon} className="justify-between" onClick={() => open(d)}>
-                      <span className="flex-1 text-left">{d === "REQUEST_CORRECTION" ? "Request correction" : def.verb}</span>
-                      <kbd className="rounded border border-current/30 px-1.5 font-mono text-[11px] opacity-80">{def.key}</kbd>
-                    </Button>
-                  );
-                })}
-                {c.requires_confirmation ? (
-                  <p className="text-xs text-amber-800">Approving needs a bank-change confirmation (call-back to the contact on the existing record).</p>
-                ) : null}
-              </div>
-            </Card>
-          ) : (
-            <Card className="px-5 py-4">
-              <p className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                <ShieldCheck className="size-4 text-slate-500" aria-hidden />
-                {c.status === "PENDING" ? "Waiting for the vendor" : "Final decision recorded"}
-              </p>
-              <p className="mt-1 text-[13px] text-slate-600">
-                {c.status === "PENDING" ? "A decision is possible once a completed check exists." : "This case is read-only."}
-              </p>
-            </Card>
-          )}
-          <Card>
-            <CardHeader title="Messages to the vendor" description="Shown on the vendor's application page. No email is sent." />
-            <MessageList messages={c.messages} audience="admin" />
-          </Card>
-          <Card>
-            <CardHeader title="Reviewer actions" />
-            {c.reviews.length ? (
-              <ol className="divide-y divide-slate-100">
-                {c.reviews.map((r, i) => (
-                  <li key={`${r.created_at}-${i}`} className="px-5 py-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <Pill tone={r.action === "APPROVE" ? "teal" : r.action === "REJECT" ? "red" : "amber"}>{r.label}</Pill>
-                      <span className="text-xs text-slate-500">{formatDateTime(r.created_at)}</span>
-                    </div>
-                    <p className="mt-1.5 text-[13px] text-slate-700">“{r.reason}”</p>
-                    {r.confirmation ? <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-teal-800"><CheckCircle2 className="size-3.5" aria-hidden />{r.confirmation}</p> : null}
-                    <p className="mt-1 text-xs text-slate-500">{r.actor} · run <span className="font-mono">{r.reviewed_run_id}</span></p>
-                  </li>
-                ))}
-              </ol>
-            ) : (
-              <p className="px-5 py-4 text-[13px] text-slate-500">No reviewer actions yet.</p>
-            )}
-          </Card>
-          <Card className="px-5 py-2">
-            <dl className="divide-y divide-slate-100">
-              <KeyValue label="Contact" value={c.contact.name || "Not supplied"} />
-              <KeyValue label="Email" value={c.contact.email || "—"} />
-              <KeyValue label="State" value={c.contact.state || "Not supplied"} />
-              <KeyValue label="Last updated" value={formatDateTime(c.updated_at)} />
-            </dl>
-          </Card>
-        </aside>
-      </div>
       <DecisionDialog c={c} action={action} onClose={() => setAction(null)} onSaved={onSaved} onUnauthorized={onUnauthorized} />
       <ShortcutHelp open={help} onOpenChange={setHelp} />
     </div>

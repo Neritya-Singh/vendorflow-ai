@@ -27,7 +27,7 @@ export function ProcessingPanel({ run, title, onRetry, onCheckStatus }: {
   const active = run.phase === "sending" || run.phase === "running";
   return (
     <Card className="overflow-hidden">
-      <div className="border-b border-slate-200 px-5 py-4">
+      <div className="border-b border-line px-5 py-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-[15px] font-semibold text-slate-900">{title}</h2>
@@ -68,7 +68,7 @@ export function ProcessingPanel({ run, title, onRetry, onCheckStatus }: {
         <StageList rows={run.stages} liveStartedAt={run.liveStartedAt} audience="vendor" />
       </div>
       {run.phase === "interrupted" ? (
-        <div className="border-t border-slate-200 px-5 py-4">
+        <div className="border-t border-line px-5 py-4">
           <Alert tone="warning" title="Connection interrupted">
             We lost the connection before the server confirmed a result. Your application may still have been
             saved. Check its status with your application ID and tracking code before retrying — retrying with the
@@ -81,7 +81,7 @@ export function ProcessingPanel({ run, title, onRetry, onCheckStatus }: {
         </div>
       ) : null}
       {run.phase === "failed" && run.error ? (
-        <div className="border-t border-slate-200 px-5 py-4">
+        <div className="border-t border-line px-5 py-4">
           <Alert tone="error" title="This check could not be completed">
             {run.error.message}
             {onRetry || onCheckStatus ? (

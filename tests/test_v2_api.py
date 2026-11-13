@@ -584,3 +584,53 @@ def test_plain_case_approval_needs_no_confirmation_and_reject_reason_reaches_ven
     tracked = client.post("/api/vendor/track", json=creds).json()
     assert tracked["messages"][0]["text"] == ("We couldn't approve your application: Bank account not owned by the "
                                               "business. Questions: contact Zamp AI's finance team.")
+
+
+# ---------------------------------------------------------------- B4 dashboard + viewer
+
+def test_overview_metrics_are_computed_from_saved_runs(client):
+    approve_first(client)                                   # first submission, approved
+    fields, gst, bank = fixture("ec3_duplicate_changed_bank")
+    _, response = submit(client, fields, gst, bank)         # first submission, to team
+    stream_events(response)
+    other, ogst, obank = fixture("frontend_happy")
+    _, response = submit(client, other, None, None)         # no documents: excluded from median
+    stream_events(response)
+    admin(client)
+    data = client.get("/api/admin/overview").json()
+    m = data["metrics"]
+    assert m["first_submissions"] == 3 and m["straight_through_rate"] == 33
+    assert m["runs_with_documents"] == 2 and isinstance(m["median_check_ms"], int)
+    reasons = {r["reason"]: r["count"] for r in data["top_reasons"]["items"]}
+    assert reasons == {"Duplicate or bank reuse": 1, "Missing or wrong document": 1}
+    assert data["top_reasons"]["days"] == 7
+    runs = data["recent_runs"]
+    assert len(runs) == 3 and {r["result"] for r in runs} == {"Approved", "Sent to team", "Waiting on vendor"}
+    assert all(r["trigger"] == "Submission" for r in runs)
+
+
+def test_empty_overview_shows_no_invented_numbers(client):
+    admin(client)
+    m = client.get("/api/admin/overview").json()["metrics"]
+    assert m["straight_through_rate"] is None and m["median_check_ms"] is None and m["oldest_needs_review"] is None
+
+
+def test_document_viewer_renders_committed_pages_for_reviewers_only(client):
+    first = approve_first(client)
+    fields, gst, bank = fixture("ec3_duplicate_changed_bank")
+    creds, response = submit(client, fields, gst, bank)
+    run_id = result_of(stream_events(response))["latest_run_id"]
+    base = f"/api/admin/applications/{creds['application_id']}/runs/{run_id}/documents/BANK"
+    assert client.get(base + "/pages").status_code == 401
+    assert client.get(base + "/pages/1").status_code == 401
+    admin(client)
+    assert client.get(base + "/pages").json() == {"pages": 1, "total_pages": 1}
+    page = client.get(base + "/pages/1")
+    assert page.status_code == 200 and page.headers["content-type"] == "image/png"
+    assert page.content[:8] == b"\x89PNG\r\n\x1a\n" and "no-store" in page.headers["cache-control"]
+    assert client.get(base + "/pages/2").status_code == 404
+    assert client.get(base + "/pages/0").status_code == 404
+    case = client.get(f"/api/admin/applications/{creds['application_id']}").json()
+    linked = case["linked_records"][0]
+    assert linked["application_id"] == first["application_id"] and linked["documents"] == ["GST", "BANK"]
+    assert linked["latest_run_id"].startswith("RUN-")

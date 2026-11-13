@@ -124,8 +124,8 @@ try {
   check("B 'Needs review' tab lists the team case with reason and risk", firstRow.includes(B.id)
     && firstRow.includes("Bank account holder differs from legal name") && firstRow.includes("Medium"), firstRow);
   await ap.getByRole("link", { name: ec2.legal_name }).first().click();
-  await ap.getByRole("heading", { name: "Submitted vs. PDF evidence" }).waitFor();
-  const masked = await ap.locator("table").first().textContent();
+  await ap.getByRole("heading", { name: "Compared values" }).waitFor();
+  const masked = await ap.locator("section", { hasText: "Compared values" }).locator("table").textContent();
   check("B admin comparison masks account number by default", !masked.includes(ec2.account_number) && masked.includes("•"));
   await shot(ap, "08-admin-case");
   // Keyboard: C opens the correction dialog with a message pre-drafted from the flagged items.
@@ -183,7 +183,7 @@ try {
   check("I queue puts the high-risk case first with its reason", iRow.includes(I.id)
     && iRow.includes("Same GSTIN as an approved vendor, different bank account") && iRow.includes("High"), iRow);
   await ap.keyboard.press("/");
-  check("'/' focuses queue search", await ap.evaluate(() => document.activeElement?.getAttribute("aria-label") === "Search applications"));
+  check("'/' focuses queue search", await ap.evaluate(() => document.activeElement?.id === "admin-search"));
   await ap.keyboard.press("Escape");
   await ap.keyboard.press("k");
   await ap.keyboard.press("Enter");
@@ -192,7 +192,22 @@ try {
   check("I case links the approved record and flags the differing account", linked.includes(`Open ${B.id}`)
     && /Account no\.[^A-Za-z]*Differs/.test(linked), linked.slice(0, 160));
   check("I linked comparison keeps account numbers masked", !linked.includes(ec3.account_number) && !linked.includes(ec2.account_number));
+  const viewerImg = ap.locator("section[aria-labelledby=doc-h] img").first();
+  await viewerImg.waitFor();
+  await ap.waitForFunction(() => document.querySelector("section[aria-labelledby=doc-h] img")?.complete);
+  check("I document viewer shows the committed document page", (await viewerImg.evaluate((i) => i.naturalWidth)) > 0);
+  await ap.getByRole("tab", { name: /bank proof/ }).last().click();
+  check("I viewer offers the linked record's bank proof", (await ap.getByRole("tab", { name: `${B.id} bank proof` }).count()) === 1);
+  await ap.waitForFunction(() => [...document.querySelectorAll("section[aria-labelledby=doc-h] img")].every((i) => i.complete && i.naturalWidth > 0));
   await shot(ap, "09b-admin-linked-record");
+  const noPageScroll = () => ap.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1);
+  await ap.setViewportSize({ width: 1440, height: 900 });
+  check("Fit-to-screen: case page does not scroll at 1440×900", await noPageScroll());
+  await ap.setViewportSize({ width: 1280, height: 760 });
+  check("Fit-to-screen: case page does not scroll at 1280×760", await noPageScroll());
+  await ap.setViewportSize({ width: 1100, height: 700 });
+  check("Below 1280×760 the page scrolls normally instead", !(await noPageScroll()));
+  await ap.setViewportSize({ width: 1440, height: 950 });
   await ap.keyboard.press("?");
   await ap.getByRole("dialog", { name: "Keyboard shortcuts" }).waitFor();
   check("'?' shows the shortcut list", true);
@@ -268,6 +283,7 @@ try {
   // ------------------------------------------------------------ admin: PDF, approve, history
   await ap.goto(`${BASE}/admin`);
   await ap.getByRole("heading", { name: "Applications" }).waitFor();
+  check("Fit-to-screen: queue does not scroll at 1440×950", await ap.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1));
   await ap.getByRole("tab", { name: /Waiting on vendor/ }).click();
   await ap.locator('[role="tab"][aria-selected="true"]', { hasText: "Waiting on vendor" }).waitFor();
   await ap.locator("tbody tr", { hasText: C.id }).waitFor({ timeout: 5_000 }).catch(() => {});
@@ -282,9 +298,9 @@ try {
   check("Admin can open the exact committed PDF", pdfStatus === "200 application/pdf", pdfStatus);
   await ap.getByRole("tab", { name: /All/ }).click();
   await shot(ap, "15-admin-queue-all");
-  await ap.getByRole("link", { name: "Decision history" }).first().click();
+  await ap.getByRole("link", { name: "Activity" }).first().click();
   await ap.getByRole("heading", { name: "Decision history" }).waitFor();
-  check("Decision history shows the correction request", (await ap.locator("tbody").textContent()).includes("Reviewer requested a correction"));
+  check("Decision history shows the correction request", (await ap.locator("section", { hasText: "Decision history" }).locator("tbody").textContent()).includes("Reviewer requested a correction"));
 
   // ------------------------------------------------------------ mobile
   const mobile = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });

@@ -45,6 +45,7 @@ export interface Health {
 }
 
 export interface Meta {
+  workspace_name?: string;
   states: string[];
   max_pdf_bytes: number;
   stages: { stage_id: string; label: string }[];
@@ -177,11 +178,28 @@ export interface Overview {
     needs_review: number;
     waiting_on_vendor: number;
     oldest_needs_review: string | null;
+    straight_through_rate: number | null;
+    first_submissions: number;
+    median_check_ms: number | null;
+    runs_with_documents: number;
     run_count: number;
     mean_seconds: number | null;
   };
   queue: QueueRow[];
   recent_actions: ReviewRecord[];
+  top_reasons: { days: number; runs: number; items: { reason: string; count: number }[] };
+  recent_runs: RecentRun[];
+}
+
+export interface RecentRun {
+  run_id: string;
+  application_id: string;
+  business: string;
+  at: string | null;
+  trigger: "Submission" | "Re-check";
+  result: "Approved" | "Waiting on vendor" | "Sent to team";
+  status: Status;
+  elapsed_ms: number | null;
 }
 
 export interface Issue {
@@ -218,6 +236,7 @@ export interface RunDetail {
 export interface AdminCase {
   application_id: string;
   business: string;
+  gstin: string;
   status: Status;
   status_label: string;
   decision_source: string;
@@ -254,4 +273,6 @@ export interface LinkedRecord {
   status_label: string;
   match: string[];
   comparison: { field: string; this: string; other: string; same: boolean }[];
+  latest_run_id: string | null;
+  documents: ("GST" | "BANK")[];
 }
