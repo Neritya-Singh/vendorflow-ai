@@ -1,0 +1,470 @@
+"""VendorFlow AI v2 — thin FastAPI adapter over the v1.1 Python services.
+
+Run:  uvicorn backend.main:app --port 8000
+Serves /api/* and (when built) the React app from frontend/dist with SPA fallback.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import queue
+import re
+import secrets
+import threading
+from collections.abc import Callable
+from datetime import datetime, timezone
+from typing import Literal
+
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
+
+from vendorflow.gemini_extractor import safe_model_name
+from vendorflow.models import StageEvent, VendorSubmission
+from vendorflow.pdf_reader import MAX_PDF_BYTES, PDFInput, UploadError, read_pdf
+from vendorflow.persistence import (
+    PersistenceError, PreparedIntake, StaleRevision, TerminalApplication, UnauthorizedTracking,
+    prepare_intake,
+)
+from vendorflow.pipeline import MinimumIntakeError
+from vendorflow.rules import GST_STATE_CODES
+
+from . import presenters
+from .config import Settings, load_settings
+from .security import (
+    COOKIE_NAME, LoginThrottle, SlidingWindowLimiter, client_key, issue_session, read_session,
+    require_admin, require_admin_csrf,
+)
+from .services import ServiceProvider
+
+log = logging.getLogger("vendorflow.api")
+APP_ID = re.compile(r"^VF-[0-9A-F]{12}$")
+TOKEN = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
+RUN_ID = re.compile(r"^RUN-[0-9A-F]{12}$")
+MAX_REQUEST_BYTES = 2 * MAX_PDF_BYTES + 512 * 1024
+PDF_MIME = {"application/pdf", "application/x-pdf"}
+
+
+class Credentials(BaseModel):
+    application_id: str = Field(max_length=32)
+    tracking_code: str = Field(max_length=80)
+
+
+class Login(BaseModel):
+    password: str = Field(max_length=256)
+
+
+class Review(BaseModel):
+    action: Literal["APPROVE", "REJECT", "REQUEST_CORRECTION"]
+    reason: str = Field(min_length=3, max_length=1000)
+    expected_revision: int
+    expected_latest_run_id: str
+
+
+
+def create_app(settings: Settings | None = None, provider: ServiceProvider | None = None) -> FastAPI:
+    settings = settings or load_settings()
+    provider = provider or ServiceProvider(settings)
+    app = FastAPI(title="VendorFlow AI v2 API", docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.settings = settings
+    app.state.provider = provider
+    app.state.trust_proxy = os.getenv("TRUST_PROXY", "").strip() == "1"
+    admin_throttle = LoginThrottle()
+    vendor_limiter = SlidingWindowLimiter(limit=10, window_seconds=15 * 60)
+
+    # ------------------------------------------------------------ middleware
+    @app.middleware("http")
+    async def guard(request: Request, call_next):
+        length = request.headers.get("content-length")
+        if length and length.isdigit() and int(length) > MAX_REQUEST_BYTES:
+            return JSONResponse({"detail": "Upload too large. Each PDF must be 5 MB or less."}, status_code=413)
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        if request.url.path.startswith("/api/"):
+            response.headers.setdefault("Cache-Control", "no-store")
+        else:
+            response.headers.setdefault(
+                "Content-Security-Policy",
+                "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+                "font-src 'self' data:; object-src 'none'; frame-src 'self'; frame-ancestors 'none'; "
+                "base-uri 'self'; form-action 'self'")
+        return response
+
+    # ------------------------------------------------------------ helpers
+    def safe_error(exc: Exception) -> tuple[int, str, str]:
+        if isinstance(exc, UnauthorizedTracking):
+            return 401, "UNAUTHORIZED", "Application ID or tracking code is incorrect."
+        if isinstance(exc, TerminalApplication):
+            return 409, "TERMINAL", "This application has a final decision and can no longer be changed."
+        if isinstance(exc, StaleRevision):
+            return 409, "STALE", str(exc)
+        if isinstance(exc, PersistenceError):
+            return 503, "PERSISTENCE", str(exc)  # messages are written to be safe for display
+        if isinstance(exc, (MinimumIntakeError, UploadError)):
+            return 400, "INVALID", str(exc)
+        log.error("Unexpected %s during request", type(exc).__name__)  # type only; no payload/secrets
+        return 500, "UNEXPECTED", "The operation could not be completed. Please retry shortly."
+
+    def fail(exc: Exception) -> HTTPException:
+        status, _kind, message = safe_error(exc)
+        return HTTPException(status_code=status, detail=message)
+
+    async def read_upload(upload: UploadFile | None, label: str) -> PDFInput | None:
+        if upload is None or not (upload.filename or "").strip():
+            return None
+        name = upload.filename.replace("\\", "/").rsplit("/", 1)[-1][:120]
+        if not name.casefold().endswith(".pdf"):
+            raise HTTPException(400, f"{label}: only .pdf files are accepted.")
+        if (upload.content_type or "").split(";")[0].strip().lower() not in PDF_MIME:
+            raise HTTPException(400, f"{label}: the file must be a PDF (application/pdf).")
+        content = await upload.read(MAX_PDF_BYTES + 1)
+        if len(content) > MAX_PDF_BYTES:
+            raise HTTPException(413, f"{label}: the PDF exceeds 5 MB. Upload a smaller file.")
+        pdf = PDFInput(name, content)
+        try:
+            read_pdf(pdf)  # magic bytes, empty file and size are checked by the v1.1 reader
+        except UploadError as exc:
+            raise HTTPException(400, f"{label}: {exc}") from None
+        return pdf
+
+    def check_credentials(application_id: str, tracking_code: str) -> None:
+        if not APP_ID.fullmatch(application_id or "") or not TOKEN.fullmatch(tracking_code or ""):
+            raise HTTPException(401, "Application ID or tracking code is incorrect.")
+
+    def vendor_auth(request: Request, application_id: str, tracking_code: str) -> dict:
+        key = client_key(request)
+        if vendor_limiter.blocked(key):
+            raise HTTPException(429, "Too many unsuccessful attempts. Wait 15 minutes and try again.")
+        try:
+            check_credentials(application_id, tracking_code)
+            return provider.repo().authenticate_vendor(application_id, tracking_code)
+        except (HTTPException, UnauthorizedTracking) as exc:
+            vendor_limiter.hit(key)
+            if isinstance(exc, HTTPException):
+                raise
+            raise fail(exc) from None
+        except Exception as exc:
+            raise fail(exc) from None
+
+    def stream(work: Callable[[Callable[[StageEvent], None]], dict]) -> StreamingResponse:
+        """Run the real pipeline in a worker thread; forward each REAL stage callback.
+
+        The worker finishes and commits even if the browser disconnects, so the
+        vendor can always recover the saved outcome with their tracking code.
+        """
+        events: queue.Queue = queue.Queue()
+
+        def callback(event: StageEvent) -> None:
+            events.put({"type": "stage", **event.model_dump(mode="json")})
+
+        def worker() -> None:
+            try:
+                events.put({"type": "result", "data": work(callback)})
+            except Exception as exc:  # noqa: BLE001 - mapped to safe messages
+                status, kind, message = safe_error(exc)
+                events.put({"type": "error", "status": status, "kind": kind, "message": message})
+            finally:
+                events.put(None)
+
+        threading.Thread(target=worker, name="vf-evaluation", daemon=True).start()
+
+        def body():
+            yield json.dumps({"type": "accepted", "at": datetime.now(timezone.utc).isoformat()}) + "\n"
+            while True:
+                try:
+                    item = events.get(timeout=10)
+                except queue.Empty:
+                    yield json.dumps({"type": "heartbeat"}) + "\n"
+                    continue
+                if item is None:
+                    return
+                yield json.dumps(item) + "\n"
+
+        return StreamingResponse(body(), media_type="application/x-ndjson",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    def vendor_from_form(**fields: str) -> VendorSubmission:
+        return VendorSubmission(**{k: (v or "")[:200] for k, v in fields.items()})
+
+    # ------------------------------------------------------------ public meta
+    @app.get("/api/health")
+    def health():
+        return {
+            "status": "ok",
+            "mode": "offline" if settings.offline_mode else "live",
+            "gemini_configured": settings.gemini_configured,
+            "supabase_configured": settings.supabase_configured,
+            "admin_configured": bool(settings.admin_password),
+            "extractor": ("offline-label-test-double"
+                          if settings.offline_mode and settings.offline_extractor != "gemini"
+                          else safe_model_name(os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"))),
+        }
+
+    @app.get("/api/meta")
+    def meta():
+        return {"states": sorted(s.title().replace(" And ", " and ") for s in GST_STATE_CODES),
+                "max_pdf_bytes": MAX_PDF_BYTES,
+                "stages": [{"stage_id": s, "label": label} for s, label in presenters.STAGES]}
+
+    # ------------------------------------------------------------ vendor
+    @app.post("/api/vendor/intake")
+    def new_intake():
+        """Issue credentials BEFORE any durable write (v1.1 recovery contract).
+
+        Nothing is stored. The pair is only bound to an application on submit.
+        """
+        issued = prepare_intake()
+        return {"application_id": issued.application_id, "tracking_code": issued.tracking_code}
+
+    @app.post("/api/vendor/applications")
+    async def submit_application(
+        request: Request,
+        application_id: str = Form(...), tracking_code: str = Form(...),
+        legal_name: str = Form(""), business_state: str = Form(""), contact_name: str = Form(""),
+        contact_email: str = Form(""), pan: str = Form(""), gstin: str = Form(""),
+        bank_holder: str = Form(""), account_number: str = Form(""), ifsc: str = Form(""),
+        gst_pdf: UploadFile | None = File(None), bank_pdf: UploadFile | None = File(None),
+    ):
+        check_credentials(application_id, tracking_code)
+        vendor = vendor_from_form(legal_name=legal_name, business_state=business_state,
+                                  contact_name=contact_name, contact_email=contact_email, pan=pan,
+                                  gstin=gstin, bank_holder=bank_holder, account_number=account_number,
+                                  ifsc=ifsc)
+        if not vendor.legal_name.strip() or not vendor.contact_email.strip():
+            raise HTTPException(400, "Legal business name and contact email are needed to create an application.")
+        gst = await read_upload(gst_pdf, "GST certificate")
+        bank = await read_upload(bank_pdf, "Bank proof")
+        try:
+            repo = provider.repo()
+            exists = bool(repo.client.table("applications").select("id")
+                          .eq("id", application_id).limit(1).execute().data)
+        except Exception as exc:
+            raise fail(exc) from None
+        if exists:
+            # Retry/resume of the SAME application: possession of its code is required.
+            vendor_auth(request, application_id, tracking_code)
+        service = provider.service()
+
+        def work(callback):
+            receipt = service.submit(vendor, gst, bank, stage_callback=callback,
+                                     prepared=PreparedIntake(application_id, tracking_code))
+            saved = service.repo.runs_for_application(application_id)
+            manifest = next((r.get("document_manifest") or [] for r in saved
+                             if r.get("id") == receipt.result.run_id), [])
+            return presenters.receipt_view(application_id, receipt.result, vendor.model_dump(), manifest)
+
+        return stream(work)
+
+    @app.post("/api/vendor/track")
+    def track(request: Request, body: Credentials):
+        application_id = body.application_id.strip().upper()
+        record = vendor_auth(request, application_id, body.tracking_code.strip())
+        try:
+            repo = provider.repo()
+            runs = repo.runs_for_application(application_id)
+            reviews = repo.review_history(application_id)
+        except Exception as exc:
+            raise fail(exc) from None
+        return presenters.vendor_view(record, runs, reviews)
+
+    @app.post("/api/vendor/resubmit")
+    async def resubmit(
+        request: Request,
+        application_id: str = Form(...), tracking_code: str = Form(...),
+        expected_revision: int = Form(...), expected_latest_run_id: str = Form(...),
+        legal_name: str = Form(""), business_state: str = Form(""), contact_name: str = Form(""),
+        contact_email: str = Form(""), pan: str = Form(""), gstin: str = Form(""),
+        bank_holder: str = Form(""), account_number: str = Form(""), ifsc: str = Form(""),
+        gst_pdf: UploadFile | None = File(None), bank_pdf: UploadFile | None = File(None),
+    ):
+        record = vendor_auth(request, application_id, tracking_code)
+        if record.get("current_status") != "PENDING" or not record.get("latest_run_id"):
+            raise HTTPException(409, "This application has a final decision and can no longer be changed.")
+        if not RUN_ID.fullmatch(expected_latest_run_id or "") or expected_latest_run_id != record.get("latest_run_id") \
+                or expected_revision != int(record.get("revision") or 0):
+            raise HTTPException(409, "A newer revision exists. Refresh your application before resubmitting.")
+        vendor = vendor_from_form(legal_name=legal_name, business_state=business_state,
+                                  contact_name=contact_name, contact_email=contact_email, pan=pan,
+                                  gstin=gstin, bank_holder=bank_holder, account_number=account_number,
+                                  ifsc=ifsc)
+        if not vendor.legal_name.strip() or not vendor.contact_email.strip():
+            raise HTTPException(400, "Legal name and contact email are required.")
+        gst = await read_upload(gst_pdf, "GST certificate")
+        bank = await read_upload(bank_pdf, "Bank proof")
+        service = provider.service()
+
+        def work(callback):
+            service.resubmit(application_id, tracking_code, vendor, gst_upload=gst, bank_upload=bank,
+                             stage_callback=callback, expected_revision=expected_revision,
+                             expected_latest_run_id=expected_latest_run_id)
+            fresh, runs = service.track(application_id, tracking_code)
+            return presenters.vendor_view(fresh, runs, service.repo.review_history(application_id))
+
+        return stream(work)
+
+    # ------------------------------------------------------------ admin auth
+    @app.post("/api/admin/session")
+    def admin_login(request: Request, body: Login):
+        if not settings.admin_password:
+            raise HTTPException(503, "Administrator access is not configured on this server.")
+        key = client_key(request)
+        wait = admin_throttle.locked_for(key)
+        if wait:
+            raise HTTPException(429, f"Too many failed sign-in attempts. Try again in about {(wait + 59) // 60} minute(s).")
+        if not secrets.compare_digest(body.password.encode(), settings.admin_password.encode()):
+            locked = admin_throttle.failure(key)
+            if locked:
+                raise HTTPException(429, "Too many failed sign-in attempts. Sign-in is locked for 15 minutes.")
+            raise HTTPException(401, "Incorrect administrator password.")
+        admin_throttle.success(key)
+        cookie, csrf = issue_session(settings)
+        response = JSONResponse({"authenticated": True, "csrf_token": csrf})
+        response.set_cookie(COOKIE_NAME, cookie, max_age=settings.session_hours * 3600, httponly=True,
+                            secure=settings.cookie_secure, samesite="strict", path="/api")
+        return response
+
+    @app.get("/api/admin/session")
+    def admin_session(request: Request):
+        session = read_session(settings, request.cookies.get(COOKIE_NAME))
+        if not session:
+            return {"authenticated": False, "configured": bool(settings.admin_password)}
+        return {"authenticated": True, "csrf_token": session["csrf"], "configured": True}
+
+    @app.delete("/api/admin/session")
+    def admin_logout(_session: dict = Depends(require_admin_csrf)):
+        response = JSONResponse({"authenticated": False})
+        response.delete_cookie(COOKIE_NAME, path="/api", secure=settings.cookie_secure,
+                               httponly=True, samesite="strict")
+        return response
+
+    # ------------------------------------------------------------ admin data
+    def valid_app_id(application_id: str) -> str:
+        if not APP_ID.fullmatch(application_id):
+            raise HTTPException(404, "Application not found.")
+        return application_id
+
+    @app.get("/api/admin/overview")
+    def admin_overview(_session: dict = Depends(require_admin)):
+        try:
+            repo = provider.repo()
+            apps = repo.admin_queue("ALL")
+            run_rows = (repo.client.table("runs")
+                        .select("id,application_id,checks_json,reasons_json,elapsed_ms,created_at,finished_at,extraction_error")
+                        .limit(1000).execute().data)
+            review_rows = (repo.client.table("review_actions")
+                           .select("application_id,action,reason,actor,created_at,reviewed_run_id")
+                           .order("created_at", desc=True).limit(1000).execute().data)
+        except Exception as exc:
+            raise fail(exc) from None
+        view = presenters.admin_overview(apps, run_rows, review_rows)
+        names = {a.get("id"): (a.get("payload_json") or {}).get("legal_name", "") for a in apps}
+        view["recent_actions"] = [{**presenters._review_dict(r), "application_id": r.get("application_id"),
+                                   "business": names.get(r.get("application_id"), "")}
+                                  for r in review_rows[:100]]
+        return view
+
+    def load_case(application_id: str):
+        repo = provider.repo()
+        rows = repo.client.table("applications").select("*").eq("id", application_id).limit(1).execute().data
+        if not rows:
+            raise HTTPException(404, "Application not found.")
+        app_row = rows[0]
+        app_row.pop("tracking_token_hash", None)
+        return repo, app_row, repo.runs_for_application(application_id), repo.review_history(application_id)
+
+    @app.get("/api/admin/applications/{application_id}")
+    def admin_case(application_id: str, _session: dict = Depends(require_admin)):
+        valid_app_id(application_id)
+        try:
+            _repo, app_row, runs, reviews = load_case(application_id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise fail(exc) from None
+        return presenters.admin_case(app_row, runs, reviews)
+
+    @app.get("/api/admin/applications/{application_id}/reveal")
+    def admin_reveal(application_id: str, _session: dict = Depends(require_admin)):
+        valid_app_id(application_id)
+        try:
+            _repo, app_row, runs, _reviews = load_case(application_id)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise fail(exc) from None
+        extracted = (runs[0].get("extracted_json") if runs else {}) or {}
+        return {"rows": presenters.unmasked_comparison(app_row.get("payload_json") or {}, extracted)}
+
+    @app.get("/api/admin/applications/{application_id}/runs/{run_id}/documents/{doc_type}")
+    def admin_document(application_id: str, run_id: str, doc_type: Literal["GST", "BANK"],
+                       _session: dict = Depends(require_admin)):
+        valid_app_id(application_id)
+        if not RUN_ID.fullmatch(run_id):
+            raise HTTPException(404, "Run not found.")
+        try:
+            pdf = provider.repo().load_run_document(application_id, run_id, doc_type)
+        except Exception as exc:
+            raise fail(exc) from None
+        if pdf is None:
+            raise HTTPException(404, "No PDF of this type was used in that run.")
+        filename = presenters.SAFE_FILENAME.sub("_", f"{application_id}_{run_id}_{doc_type}.pdf")
+        return Response(pdf.content, media_type="application/pdf", headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+            "Content-Security-Policy": "sandbox; default-src 'none'; object-src 'self'",
+        })
+
+    @app.post("/api/admin/applications/{application_id}/review")
+    def admin_review(application_id: str, body: Review, _session: dict = Depends(require_admin_csrf)):
+        valid_app_id(application_id)
+        reason = body.reason.strip()
+        if len(reason) < 3:
+            raise HTTPException(400, "A specific written rationale is required.")
+        try:
+            repo, app_row, runs, reviews = load_case(application_id)
+            if body.action == "REQUEST_CORRECTION" and reviews:
+                latest = reviews[0]
+                from vendorflow.ux_support import active_review_request
+                if (latest.get("action") == "REQUEST_CORRECTION" and str(latest.get("reason") or "").strip() == reason
+                        and active_review_request(latest, runs[0] if runs else None)):
+                    raise HTTPException(409, "This identical correction request is already recorded.")
+            repo.admin_review(application_id, body.action, reason,
+                              expected_revision=body.expected_revision,
+                              expected_latest_run_id=body.expected_latest_run_id)
+            _repo, app_row, runs, reviews = load_case(application_id)
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except PersistenceError as exc:
+            # Stale revision, terminal case, or a DB-trigger conflict (e.g. approved GSTIN).
+            raise HTTPException(409, str(exc)) from None
+        except Exception as exc:
+            raise fail(exc) from None
+        return presenters.admin_case(app_row, runs, reviews)
+
+    @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+    def api_not_found(path: str):
+        raise HTTPException(404, "Not found.")
+
+    # ------------------------------------------------------------ React SPA
+    dist = settings.frontend_dist
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def spa(path: str):
+        if not dist.is_dir():
+            return JSONResponse({"detail": "Frontend not built. Run `npm run build` in frontend/ "
+                                           "or use the Vite dev server."}, status_code=404)
+        candidate = (dist / path).resolve()
+        if path and candidate.is_file() and dist.resolve() in candidate.parents:
+            headers = {"Cache-Control": "public, max-age=31536000, immutable"} if path.startswith("assets/") else {}
+            return FileResponse(candidate, headers=headers)
+        return FileResponse(dist / "index.html", headers={"Cache-Control": "no-cache"})
+
+    return app
+
+
+app = create_app()
