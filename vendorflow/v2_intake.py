@@ -16,7 +16,6 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 from collections.abc import Callable
@@ -649,14 +648,17 @@ class DraftService:
                            app=app_row if kind == "draft" else None, ctx=ctx)
 
     def move_file(self, application_id: str, slot: str, stage_callback: StageCallback | None = None,
-                  kind: str = "draft", app: dict | None = None, ctx: tuple | None = None) -> dict:
+                  kind: str = "draft", app: dict | None = None, ctx: tuple | None = None,
+                  on_swapped: Callable[[dict], None] | None = None) -> dict:
         """Move the file in `slot` to the other slot; a file already there moves back (swap).
 
-        The move itself is a label swap in the working copy, reusing the reading made at
-        upload (no re-upload, no provider call). Saved document rows are immutable
-        (database trigger) and writes are insert-only, so the evidence row for the new slot
-        is a NEW version: a server-side storage copy made right after the response
-        (`_copy_for_moves`), or at submit if that hasn't happened (`_evaluate`)."""
+        1. A label swap in the working copy, reusing the reading made at upload (no
+           re-upload, no provider call). `on_swapped` gets that working copy at once, so the
+           vendor sees the files in place while step 2 runs.
+        2. Saved document rows are immutable (database trigger) and writes are insert-only,
+           so the evidence row for the new slot is a NEW version: a server-side storage copy.
+           It is made before this returns, and the working copy then points at it.
+        If step 2 fails, the swap stands and submit makes the copy (`_evaluate`)."""
         if slot not in SLOTS:
             raise DraftInvalid("Unknown document slot.")
         app_row, draft, _guard = self._load(application_id, kind, app, ctx)
@@ -669,7 +671,6 @@ class DraftService:
         cache = dict(draft.get("cache") or {})
         emit = _emitter(stage_callback)
         emit("U1", "STARTED", "")
-        emit("U1", "COMPLETED", "")
         emit("U2", "STARTED", "")
         emit("U2", "COMPLETED", "")
         placements, new_cache = [], {}
@@ -684,23 +685,40 @@ class DraftService:
         clear = (slot, source["document_id"]) if len(moves) == 1 else None
         placed = self._place(application_id, placements, new_cache, clear, kind=kind,
                              app=app_row if kind == "draft" else None, ctx=ctx)
-        pending = [(target, moved["document_id"]) for target, moved in placements]
-        _start_background(lambda: self._copy_for_moves(application_id, pending))
+        if on_swapped:
+            on_swapped(placed)
+        try:
+            pending = [(target, moved["document_id"]) for target, moved in placements]
+            copies = self._copies_for(application_id, self.repo.application_documents(application_id), pending)
+            placed = self._settle_moves(application_id, copies, kind, ctx)
+            emit("U1", "COMPLETED", "")
+        except Exception:  # noqa: BLE001 - the swap stands; submit makes any missing copy
+            emit("U1", "FAILED", "")
         return placed
 
-    def _copy_for_moves(self, application_id: str, pending: list[tuple[str, str]]) -> None:
-        """Best effort, after the response: the immutable evidence row for each moved file
-        in its new slot. Submit makes any copy that is missing, so a failure here is harmless."""
-        try:
-            docs = self.repo.application_documents(application_id)
-            self._copies_for(application_id, docs, pending)
-        except Exception:  # noqa: BLE001 - submit makes the copy instead
-            pass
+    def _settle_moves(self, application_id: str, copies: dict[str, dict], kind: str, ctx: tuple | None) -> dict:
+        """Point moved files at their new, correctly typed rows (only if still in place)."""
+        def change(draft: dict) -> None:
+            for slot in SLOTS:
+                entry = draft["files"].get(slot)
+                row = copies.get(str((entry or {}).get("document_id")))
+                if entry and entry.get("moved_from") and row and row["doc_type"] == slot:
+                    entry.update(document_id=str(row["id"]), version=int(row["version"]))
+                    entry.pop("moved_from", None)
+        return self._mutate(application_id, change, kind, ctx=ctx)
 
     def _copies_for(self, application_id: str, docs: list[dict], pending: list[tuple[str, str]]) -> dict[str, dict]:
-        """{source document id: row of the same bytes typed for its target slot}, copying
-        (in parallel) only those that don't exist yet. Never changes a saved row."""
+        """{source document id: row of the same bytes typed for its target slot}. Reuses an
+        existing copy; otherwise copies (in parallel). If a copy collides with one made at
+        the same moment (unique version), the rows are re-read and that copy is reused.
+        Never changes a saved row."""
         by_id = {str(d["id"]): d for d in docs}
+
+        def existing(rows: list[dict], target: str, source: dict) -> dict | None:
+            same = [d for d in rows if d["doc_type"] == target and d["file_sha256"] == source["file_sha256"]
+                    and d["application_id"] == application_id]
+            return max(same, key=lambda d: int(d["version"])) if same else None
+
         found, todo = {}, []
         for target, source_id in pending:
             source = by_id.get(str(source_id))
@@ -708,17 +726,24 @@ class DraftService:
                 raise PersistenceError("Referenced document is not part of this application.")
             if source["doc_type"] == target:
                 found[str(source_id)] = source
-                continue
-            same = [d for d in docs if d["doc_type"] == target and d["file_sha256"] == source["file_sha256"]
-                    and d["application_id"] == application_id]
-            if same:
-                found[str(source_id)] = max(same, key=lambda d: int(d["version"]))
+            elif (row := existing(docs, target, source)) is not None:
+                found[str(source_id)] = row
             else:
                 todo.append((target, source))
-        copies = parallel(*[
-            (lambda target=target, source=source: self.repo.copy_document(
-                application_id, source, target, self._next_version(docs, target)))
-            for target, source in todo])
+
+        def copy(target: str, source: dict) -> dict:
+            rows = docs
+            for _attempt in range(3):
+                try:
+                    return self.repo.copy_document(application_id, source, target, self._next_version(rows, target))
+                except PersistenceError:
+                    # Most likely a parallel copy (move and submit at once) took this version.
+                    rows = self.repo.application_documents(application_id)
+                    if (row := existing(rows, target, source)) is not None:
+                        return row
+            raise PersistenceError("The file could not be moved. Try again.")
+
+        copies = parallel(*[(lambda target=target, source=source: copy(target, source)) for target, source in todo])
         for (_target, source), row in zip(todo, copies):
             found[str(source["id"])] = row
         return found
@@ -885,11 +910,6 @@ class DraftService:
         if evidence is not None:
             evidence.update(payload=vendor.model_dump(), manifest=manifest)
         return (saved, extractor.provider_calls) if count else saved
-
-
-def _start_background(work: Callable[[], None]) -> None:
-    """Work that may finish after the response (tests replace this to run it inline)."""
-    threading.Thread(target=work, name="vf-after-move", daemon=True).start()
 
 
 def _fields_status(fields: dict) -> str:

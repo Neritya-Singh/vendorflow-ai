@@ -202,7 +202,10 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         """
         events: queue.Queue = queue.Queue()
 
-        def callback(event: StageEvent) -> None:
+        def callback(event: StageEvent | dict) -> None:
+            if isinstance(event, dict):  # a vendor-safe view to show before the result
+                events.put({"type": "preview", "data": event})
+                return
             # Vendor stream: real stage IDs, states and times only. Internal notes
             # (provider diagnostics, screening outcomes) stay in the saved run for staff.
             events.put({"type": "stage", **event.model_dump(mode="json"), "note": "",
@@ -446,8 +449,11 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         app_row = draft_auth(request, application_id, body.tracking_code.strip())
         reading_budget(request)
         service = provider.drafts()
+        # The swapped view arrives as a preview at once; the result follows once the
+        # moved files' evidence copies are saved (Continue waits for that).
         return stream(lambda callback: drafts_view(application_id, service.move_file(
-            application_id, body.slot, callback, app=app_row)))
+            application_id, body.slot, callback, app=app_row,
+            on_swapped=lambda d: callback(drafts_view(application_id, d)))))
 
     @app.post("/api/vendor/draft/remove")
     def remove_draft_file(request: Request, body: DraftSlot):
@@ -541,7 +547,8 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         reading_budget(request)
         service = provider.drafts()
         return stream(lambda callback: fixes_view(
-            application_id, service.move_file(application_id, body.slot, callback, kind="fix", ctx=ctx), ctx))
+            application_id, service.move_file(application_id, body.slot, callback, kind="fix", ctx=ctx,
+                                              on_swapped=lambda d: callback(fixes_view(application_id, d, ctx))), ctx))
 
     @app.put("/api/vendor/fix/values")
     def save_fix_values(request: Request, body: DraftValues):

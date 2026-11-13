@@ -63,6 +63,8 @@ export function useSlotReading<V extends DraftView>({ creds, base, maxBytes, ado
 }) {
   const [activity, setActivity] = useState<Partial<Record<Slot, SlotActivity>>>({});
   const [slotErrors, setSlotErrors] = useState<Partial<Record<Slot, string>>>({});
+  // After "Move it" shows the files in place, the server is still saving their copies.
+  const [moving, setMoving] = useState(false);
   const lastFiles = useRef<Partial<Record<Slot, File>>>({});
 
   const handler = (slots: Slot[], filename: (s: Slot) => string, labels = READING_LABEL) => (m: DraftStreamMessage) => {
@@ -72,6 +74,9 @@ export function useSlotReading<V extends DraftView>({ creds, base, maxBytes, ado
         for (const s of slots) next[s] = nextActivity(a[s], filename(s), m.stage_id, m.event, labels);
         return next;
       });
+    } else if (m.type === "preview") {
+      adopt(m.data as V);
+      finish(slots); // the files are in place; only the save is left (`moving`)
     } else if (m.type === "result") {
       adopt(m.data as V);
     } else if (m.type === "error") {
@@ -114,6 +119,7 @@ export function useSlotReading<V extends DraftView>({ creds, base, maxBytes, ado
     if (view.files[other]) landing[slot] = view.files[other]!.filename;
     const slots = Object.keys(landing) as Slot[];
     setSlotErrors({});
+    setMoving(true);
     setActivity(Object.fromEntries(slots.map((s) => [s, { filename: landing[s] ?? "", stage: "Moving your file", progress: 10 }])));
     try {
       await moveDraftFile(creds, slot, handler(slots, (s) => landing[s] ?? "", MOVING_LABEL), base);
@@ -121,9 +127,10 @@ export function useSlotReading<V extends DraftView>({ creds, base, maxBytes, ado
       setSlotErrors({ [slot]: e instanceof Error ? e.message : "Couldn't move the file." });
     } finally {
       finish(SLOTS);
+      setMoving(false);
     }
   };
 
   const retry = (slot: Slot) => (lastFiles.current[slot] ? () => void upload(slot, lastFiles.current[slot]!) : null);
-  return { activity, slotErrors, upload, move, retry, busy: Object.keys(activity).length > 0 };
+  return { activity, slotErrors, upload, move, retry, moving, busy: moving || Object.keys(activity).length > 0 };
 }

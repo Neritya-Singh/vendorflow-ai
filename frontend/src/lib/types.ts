@@ -343,6 +343,8 @@ export type DraftStreamMessage =
   | { type: "heartbeat" }
   | StageEvent
   | { type: "result"; data: DraftView }
+  /** "Move it": the swapped view, sent before the moved files' copies are saved. */
+  | { type: "preview"; data: DraftView }
   | { type: "error"; status: number; kind: string; message: string };
 
 // ---------------------------------------------------------------- B7 fix items

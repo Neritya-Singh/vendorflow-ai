@@ -105,7 +105,7 @@ export function ApplyPage() {
     setView((current) => (current && current.rev > v.rev ? current : v));
     if (!contactRef.current) contactRef.current = v.contact;
   }, []);
-  const { activity, slotErrors, upload, move, retry } = useSlotReading<DraftView>({ creds, base: "/api/vendor/draft", maxBytes, adopt });
+  const { activity, slotErrors, upload, move, retry, moving } = useSlotReading<DraftView>({ creds, base: "/api/vendor/draft", maxBytes, adopt });
 
   // Saves go one at a time, in order; those that pile up while one is in flight are merged.
   const credsRef = useRef(creds);
@@ -209,7 +209,7 @@ export function ApplyPage() {
 
   // ------------------------------------------------------------ 1 documents
   if (step === 0) {
-    const ready = !!view?.documents_ready && !Object.keys(activity).length;
+    const ready = !!view?.documents_ready && !Object.keys(activity).length && !moving;
     return (
       <VendorFrame step={0}>
         <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
@@ -234,8 +234,8 @@ export function ApplyPage() {
             <div className="lg:hidden"><Recovery creds={creds} compact /></div>
             <div className="flex flex-col gap-3 border-t border-line-soft pt-3 sm:flex-row sm:items-center sm:justify-between sm:pt-4">
               <span className="hidden text-[13px] text-muted sm:block">Your progress is saved automatically.</span>
-              <Button size="lg" className="min-h-[52px] rounded-[14px] text-base sm:min-h-11 sm:rounded-xl sm:px-7" disabled={!ready} onClick={() => void goTo(1)}>
-                Continue <ArrowRight className="size-4" aria-hidden />
+              <Button size="lg" className="min-h-[52px] rounded-[14px] text-base sm:min-h-11 sm:rounded-xl sm:px-7" disabled={!ready} loading={moving} onClick={() => void goTo(1)}>
+                {moving ? "Moving your file…" : <>Continue <ArrowRight className="size-4" aria-hidden /></>}
               </Button>
             </div>
           </Panel>

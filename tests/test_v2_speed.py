@@ -39,14 +39,6 @@ class Calls:
         self.downloads = self.storage.downloads
 
 
-@pytest.fixture
-def after_move(monkeypatch):
-    """Collects the work Move it leaves for after the response, to run it when the test says."""
-    queued = []
-    monkeypatch.setattr(v2_intake, "_start_background", queued.append)
-    return queued
-
-
 def test_saving_a_detail_is_two_round_trips(counted):
     client, provider = counted
     c = creds(client)
@@ -97,51 +89,82 @@ def swapped_draft(client):
     return c
 
 
-def test_move_it_is_a_label_swap_then_an_immutable_copy_after_the_response(counted, after_move):
+def test_move_it_shows_the_swap_first_then_saves_the_copies_before_it_returns(counted):
     client, provider = counted
     c = swapped_draft(client)
     provider_calls = len(provider.calls)
-    calls = Calls(provider)
-    calls.reset()
-    files_before = len(calls.storage.files)
-    view = stream_events(client.post("/api/vendor/draft/move", json={**c, "slot": "GST"}))[-1]["data"]
-    assert [view["files"][s]["status"] for s in ("GST", "BANK")] == ["read", "read"]
+    storage = provider.repo().client.storage
+    files_before, downloads_before = len(storage.files), storage.downloads
+    events = stream_events(client.post("/api/vendor/draft/move", json={**c, "slot": "GST"}))
+    kinds = [e["type"] for e in events]
+    assert kinds.index("preview") < kinds.index("result")  # swapped view first, result after the copies
+    preview = next(e["data"] for e in events if e["type"] == "preview")
+    view = events[-1]["data"]
+    for v in (preview, view):
+        assert [v["files"][s]["status"] for s in ("GST", "BANK")] == ["read", "read"]
     assert len(provider.calls) == provider_calls  # the reading made at upload is reused
-    assert calls.count == 2  # authenticate + compare-and-swap write; no storage work while waiting
-    assert calls.storage.copies == 0 and calls.storage.downloads == calls.downloads
-    # After the response: one server-side copy per file (no re-upload), as NEW rows.
-    assert len(after_move) == 1
-    after_move.pop()()
-    assert calls.storage.copies == 2 and len(calls.storage.files) == files_before + 2
+    assert storage.copies == 2 and len(storage.files) == files_before + 2  # server-side copies, no re-upload
+    assert storage.downloads == downloads_before
     docs = provider.repo().client.rows["documents"]
     assert sorted((d["doc_type"], d["version"]) for d in docs) == [("BANK", 1), ("BANK", 2), ("GST", 1), ("GST", 2)]
-    # Submit uses those copies: no further copy, and both are in the run's manifest.
+    draft = provider.repo().client.rows["applications"][-1]["payload_json"]["draft"]
+    assert not any((draft["files"][s] or {}).get("moved_from") for s in ("GST", "BANK"))  # settled
+
+
+def test_submit_immediately_after_move_it_is_approved(counted):
+    """The 02-a race on Render: submit right after Move it."""
+    client, provider = counted
+    c = swapped_draft(client)
+    stream_events(client.post("/api/vendor/draft/move", json={**c, "slot": "GST"}))
     client.put("/api/vendor/draft/values", json={**c, "contact": CONTACT})
-    assert submit(client, c)["status"] == "APPROVED"
-    assert calls.storage.copies == 2
+    result = submit(client, c)
+    assert result["status"] == "APPROVED", result
+    assert provider.repo().client.storage.copies == 2  # submit reused the move's copies
     run = provider.repo().client.rows["runs"][-1]
     assert sorted((d["doc_type"], d["version"]) for d in run["document_manifest"]) == [("BANK", 2), ("GST", 2)]
 
 
-def test_submit_makes_the_copy_when_the_after_move_work_never_ran(counted, after_move):
+def test_submit_reuses_a_copy_that_lands_first_instead_of_failing(counted, monkeypatch):
+    """Move's copies didn't finish (e.g. still in flight), and while submit makes them a
+    parallel copy takes the same version: submit reuses that copy and is approved."""
     client, provider = counted
     c = swapped_draft(client)
+    repo_cls = type(provider.repo())
+    original = repo_cls.copy_document
+    monkeypatch.setattr(repo_cls, "copy_document", lambda *a, **k: (_ for _ in ()).throw(
+        v2_intake.PersistenceError("storage unavailable")))
+    view = stream_events(client.post("/api/vendor/draft/move", json={**c, "slot": "GST"}))[-1]["data"]
+    assert [view["files"][s]["status"] for s in ("GST", "BANK")] == ["read", "read"]  # the swap stands
+
+    def racing(self, application_id, source, doc_type, version):
+        original(self, application_id, source, doc_type, version)  # a parallel copy lands first...
+        return original(self, application_id, source, doc_type, version)  # ...so this one collides
+    monkeypatch.setattr(repo_cls, "copy_document", racing)
+    client.put("/api/vendor/draft/values", json={**c, "contact": CONTACT})
+    result = submit(client, c)
+    assert result["status"] == "APPROVED", result
+    docs = provider.repo().client.rows["documents"]
+    assert sorted((d["doc_type"], d["version"]) for d in docs) == [("BANK", 1), ("BANK", 2), ("GST", 1), ("GST", 2)]
+
+
+def test_submit_makes_the_copy_when_the_move_could_not(counted, monkeypatch):
+    client, provider = counted
+    c = swapped_draft(client)
+    repo_cls = type(provider.repo())
+    original = repo_cls.copy_document
+    monkeypatch.setattr(repo_cls, "copy_document", lambda *a, **k: (_ for _ in ()).throw(
+        v2_intake.PersistenceError("storage unavailable")))
     stream_events(client.post("/api/vendor/draft/move", json={**c, "slot": "GST"}))
-    after_move.clear()  # e.g. the server restarted before it ran
-    storage = provider.repo().client.storage
-    assert storage.copies == 0
+    monkeypatch.setattr(repo_cls, "copy_document", original)
     client.put("/api/vendor/draft/values", json={**c, "contact": CONTACT})
     assert submit(client, c)["status"] == "APPROVED"
-    assert storage.copies == 2
-    run = provider.repo().client.rows["runs"][-1]
-    assert sorted(d["doc_type"] for d in run["document_manifest"]) == ["BANK", "GST"]
+    assert provider.repo().client.storage.copies == 2
 
 
-def test_moving_back_and_forth_needs_no_new_reading(counted, after_move):
+def test_moving_back_and_forth_needs_no_new_reading(counted):
     client, provider = counted
     c = creds(client)
     _f, _gst, bank = fixture("happy")
-    view = None
     upload(client, c, "GST", bank)
     calls = len(provider.calls)
     view = stream_events(client.post("/api/vendor/draft/move", json={**c, "slot": "GST"}))[-1]["data"]
@@ -150,8 +173,6 @@ def test_moving_back_and_forth_needs_no_new_reading(counted, after_move):
     assert view["files"]["BANK"] is None and view["files"]["GST"]["status"] == "wrong_slot"
     view = stream_events(client.post("/api/vendor/draft/move", json={**c, "slot": "GST"}))[-1]["data"]
     assert view["files"]["BANK"]["status"] == "read" and len(provider.calls) == calls
-    for work in after_move:
-        work()
 
 
 def test_track_and_open_fix_budgets(counted):
@@ -196,7 +217,7 @@ def test_document_preview_resolves_the_run_document_once(counted):
     assert calls.storage.downloads == calls.downloads
 
 
-def test_an_upload_after_a_move_replaces_the_moved_file(counted, after_move):
+def test_an_upload_after_a_move_replaces_the_moved_file(counted):
     """A moved file carries the version of the slot it was saved in; it must not block a
     newer upload to its new slot."""
     client, provider = counted

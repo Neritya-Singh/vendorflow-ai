@@ -46,7 +46,7 @@ export function FixPanel({ creds, onSaved, prefetched }: {
     setView((current) => (current && current.rev > v.rev ? current : v));
     if (!contactRef.current) contactRef.current = v.contact;
   }, []);
-  const { activity, slotErrors, upload, move, retry, busy } = useSlotReading<FixView>({ creds, base: "/api/vendor/fix", maxBytes, adopt });
+  const { activity, slotErrors, upload, move, retry, busy, moving } = useSlotReading<FixView>({ creds, base: "/api/vendor/fix", maxBytes, adopt });
 
   useEffect(() => {
     let cancelled = false;
@@ -165,9 +165,9 @@ export function FixPanel({ creds, onSaved, prefetched }: {
       {error ? <Alert tone="error">{error}</Alert> : null}
       <div className="flex flex-col gap-3 border-t border-line-soft pt-4 sm:flex-row sm:items-center sm:justify-between">
         <span className="text-[13px] text-muted" aria-live="polite">
-          {busy ? "Reading your document…" : waiting ? "Saving your changes…" : view.ready ? "Ready to check again." : view.blockers[0]}
+          {moving ? "Moving your file…" : busy ? "Reading your document…" : waiting ? "Saving your changes…" : view.ready ? "Ready to check again." : view.blockers[0]}
         </span>
-        <Button size="lg" icon={Send} disabled={!view.ready || busy} loading={waiting} onClick={() => void recheck()}>Re-check</Button>
+        <Button size="lg" icon={Send} disabled={!view.ready || busy} loading={waiting || moving} onClick={() => void recheck()}>Re-check</Button>
       </div>
     </section>
   );
