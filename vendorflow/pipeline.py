@@ -23,15 +23,18 @@ class MinimumIntakeError(ValueError):
 class ProcessingPipeline:
     def __init__(self, extractor: Extractor, approved_lookup: Lookup | None = None, *,
                  screening: Screening | None = None, name_key: Callable[[str | None], str] | None = None,
-                 evidence_checks: EvidenceChecks | None = None):
+                 evidence_checks: EvidenceChecks | None = None,
+                 reader: Callable[[PDFInput | None], ReadPDF | None] | None = None):
         """`screening`, `name_key` and `evidence_checks` are optional v2 policy hooks. When
         omitted the v1.1 behaviour (approved-only duplicate check, strict name compare,
-        no extra rule checks) is unchanged."""
+        no extra rule checks) is unchanged. `reader` (v2 B7) replaces the PDF reader, e.g.
+        with one that also OCRs photos and scans; default: the v1.1 `read_pdf`."""
         self.extractor = extractor
         self.approved_lookup = approved_lookup
         self.screening = screening
         self.name_key = name_key
         self.evidence_checks = evidence_checks
+        self.reader = reader or read_pdf
 
     def evaluate(self, vendor: VendorSubmission, gst_upload: PDFInput | None, bank_upload: PDFInput | None,
                  *, application_id: str | None = None, trigger: str = "submission",
@@ -58,8 +61,8 @@ class ProcessingPipeline:
 
         emit("S2", "Read PDF documents", "STARTED")
         try:
-            gst_pdf = read_pdf(gst_upload)
-            bank_pdf = read_pdf(bank_upload)
+            gst_pdf = self.reader(gst_upload)
+            bank_pdf = self.reader(bank_upload)
         except UploadError:
             emit("S2", "Read PDF documents", "FAILED", "Invalid upload; no status issued")
             raise

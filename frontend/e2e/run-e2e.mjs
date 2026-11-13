@@ -200,11 +200,11 @@ try {
       && (await fixPanel.getByText("Cancelled cheque or bank letter").count()) === 1
       && (await page.getByLabel("Legal name").count()) === 0 && (await page.getByLabel("Account holder").count()) === 0);
   check("B re-check disabled until a new bank document is read", await page.getByRole("button", { name: "Re-check" }).isDisabled());
-  await fixPanel.locator('input[type="file"]').setInputFiles(pdf("happy", "gst"));
+  await fixPanel.locator('input[data-slot="BANK"]').setInputFiles(pdf("happy", "gst"));
   await fixPanel.locator('[data-slot-state="wrong_slot"]').waitFor();
   check("B a GST certificate in the bank slot gets the wrong-slot warning", (await fixPanel.getByRole("button", { name: "Move it" }).count()) === 1);
   await shot(page, "10b-fix-wrong-slot");
-  await fixPanel.locator('input[type="file"]').setInputFiles(pdf("happy", "bank"));
+  await fixPanel.locator('input[data-slot="BANK"]').setInputFiles(pdf("happy", "bank"));
   await fixPanel.locator('[data-slot-state="read"]').waitFor();
   check("B item ticked once the new bank document is read", (await fixPanel.locator('[data-item="doc:BANK"]').getAttribute("data-done")) === "true");
   await shot(page, "10c-fix-read");
@@ -308,6 +308,40 @@ try {
   C.decision = await submitDetails(page, "swapped");
   check("C after the move the case is never sent back for swapped files", C.decision !== "PENDING/VENDOR", C.decision);
 
+  // ------------------------------------------------------------ P. photos and scans (B7, real Tesseract OCR)
+  const photo = fixture("photo_cheque");
+  const tPhoto = Date.now();
+  const P = await startDocs(page, BASE, `${FIX}/photo_cheque/gst_certificate.pdf`, `${FIX}/photo_cheque/cheque_photo.jpg`);
+  const photoSeconds = (Date.now() - tPhoto) / 1000;
+  check("P cheque photo read on its slot", P.states.join() === "read,read", P.states.join());
+  check("P photo slot lists what was read", (await page.locator('[data-slot-state="read"]').nth(1).textContent()).includes("Read: account holder, account number, IFSC"));
+  console.log(`INFO  photo upload + read in the browser: ${photoSeconds.toFixed(2)} s`);
+  await shot(page, "19-photo-read");
+  await fillDetails(page, photo);
+  check("P clear cheque photo → Approved", (await submitDetails(page, "photo")) === "APPROVED/COMPLETE");
+
+  const blurry = fixture("photo_blurry");
+  const PB = await startDocs(page, BASE, `${FIX}/photo_blurry/gst_certificate.pdf`, `${FIX}/photo_blurry/cheque_photo.jpg`);
+  await fillDetails(page, blurry);
+  const pbDecision = await submitDetails(page, "blurry");
+  check("P blurry photo → waiting on vendor", pbDecision === "PENDING/VENDOR", pbDecision);
+  check("P vendor asked for a clearer copy of the bank document", (await page.locator("main").textContent()).includes("Upload a clearer copy"));
+  await shot(page, "20-photo-blurry-result");
+  await track(page, BASE, PB.id, PB.code);
+  const pbFix = page.locator("[data-fix-panel]");
+  await pbFix.waitFor();
+  await pbFix.locator('input[data-slot="BANK"]').setInputFiles(`${FIX}/photo_blurry/cheque_photo_clear.jpg`);
+  await pbFix.locator('[data-slot-state="read"]').waitFor({ timeout: 60_000 });
+  await page.getByRole("button", { name: "Re-check" }).click();
+  await page.getByText("Your update was checked and saved").waitFor({ timeout: 90_000 });
+  check("P clearer retake → Approved", (await outcome(page)) === "APPROVED/COMPLETE");
+
+  const scan = fixture("scanned_letter");
+  const S = await startDocs(page, BASE, `${FIX}/scanned_letter/gst_certificate.pdf`, `${FIX}/scanned_letter/bank_scan.pdf`);
+  check("P scanned (image-only) PDF read by OCR", S.states.join() === "read,read", S.states.join());
+  await fillDetails(page, scan);
+  check("P scanned bank letter → Approved", (await submitDetails(page, "scan")) === "APPROVED/COMPLETE");
+
   // ------------------------------------------------------------ D. unreadable bank PDF: blocked at upload
   const D = await startDocs(page, BASE, pdf("frontend_ec2_review", "gst"), UNREADABLE);
   check("D unreadable bank PDF flagged on its slot", D.states.join() === "read,unreadable", D.states.join());
@@ -395,6 +429,19 @@ try {
   check("Mobile documents step fits one screen", await mp.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1)
     && await noHorizontalOverflow(mp), M.states.join());
   await shot(mp, "17-mobile-apply-documents");
+  await mp.goto(`${BASE}/apply`);
+  const take = mp.getByRole("button", { name: "Take photo of your bank document" });
+  await take.waitFor();
+  check("Mobile 'Take photo' is enabled and opens the rear camera",
+    await take.isEnabled() && (await mp.locator('input[data-camera="BANK"]').getAttribute("capture")) === "environment"
+      && (await mp.getByText(/supported soon/).count()) === 0);
+  const [chooser] = await Promise.all([mp.waitForEvent("filechooser"), take.click()]);
+  await chooser.setFiles(`${FIX}/photo_cheque/cheque_photo.jpg`);
+  await mp.locator('[data-slot-state="read"]').waitFor({ timeout: 60_000 });
+  check("Mobile photo taken with 'Take photo' is read", true);
+  await mp.locator('input[data-slot="GST"]').setInputFiles(`${FIX}/photo_cheque/gst_certificate.pdf`);
+  await slotStates(mp, 2);
+  await shot(mp, "17b-mobile-photo-read");
   await mp.getByRole("button", { name: /Continue/ }).click();
   await mp.getByRole("heading", { name: "Check your details" }).waitFor();
   const cont = await mp.getByRole("button", { name: /Continue/ }).boundingBox();

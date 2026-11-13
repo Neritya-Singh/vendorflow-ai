@@ -22,6 +22,22 @@ React (Vite, TS, Tailwind)  ──/api──▶  FastAPI adapter (backend/)  ─
 | Tracking & correction | ID + private code; reviewer message, checks, history, documents on file; edit pending details and replace PDFs (same application ID, old evidence kept); one-click retry when document processing was unavailable |
 | Admin console | Password sign-in → HttpOnly session; workload metrics from saved records; Pending-first queue with filters and search; case page with failed checks, masked submitted-vs-PDF comparison (reveal on demand), exact PDF versions per run, run/stage history, reviewer actions; Approve / Reject / Request correction behind a confirm dialog |
 
+### Photos and scans (B7)
+
+Draft and fix uploads accept PDF, JPG and PNG up to 5 MB (type checked by extension **and** magic
+bytes; images over 40 MP are refused). Text PDFs are read as before. For a photo or an image-only
+(scanned) PDF, `vendorflow/v2_scan.py` renders the pages and runs **local Tesseract OCR**; that OCR text
+is the grounding text R13 checks every extracted value against. The values themselves come from
+Gemini's **image input** (`GeminiExtractor.extract_images`); the image is rebuilt from pixels first, so
+no EXIF, GPS or comments are sent, and the OCR text is not sent. If OCR can't confirm a value, R13
+fails and the vendor is asked for a clearer copy (fail closed). If Tesseract is missing, the file is
+marked "couldn't read just now" (our side) and the case goes to the team, never approved.
+The original file is stored as evidence. Staging needs
+`supabase/migrations/20261113_b7_bucket_image_types.sql` (not applied yet). The Docker image installs
+`tesseract-ocr`; locally run `sudo apt-get install -y tesseract-ocr tesseract-ocr-eng`.
+On phones, "Take photo" opens the rear camera; a photo over 5 MB (or HEIC) is re-encoded to JPEG in the
+browser before upload.
+
 ### How the live stage view works
 
 `POST /api/vendor/applications` (and `/api/vendor/resubmit`) runs `PersistentVendorService` in a worker
@@ -123,3 +139,6 @@ the owner's approval.
 - "Approved" means the submission is consistent with the uploaded PDFs under the prototype policy. It is
   not KYC/KYB, a GST registry lookup or bank-ownership verification.
 - The admin overview loads up to 1,000 runs and reviewer actions (prototype scale).
+- Photos: OCR is English-only Tesseract with simple lighting correction; it is tuned on synthetic
+  fixtures, not real phone photos. Offline tests use a Gemini stand-in that reads the fixture's embedded
+  ground truth instead of pixels; real Gemini image reading has not been tried yet.

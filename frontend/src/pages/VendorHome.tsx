@@ -4,8 +4,8 @@ import { VendorFrame } from "../components/AppShell";
 import { useAppState } from "../state";
 
 const NEEDS = [
-  { icon: FileText, title: "GST registration certificate", text: "PDF up to 5 MB" },
-  { icon: FileCheck2, title: "Cancelled cheque or bank letter", text: "PDF up to 5 MB · photos supported soon" },
+  { icon: FileText, title: "GST registration certificate", text: "PDF, JPG or PNG up to 5 MB" },
+  { icon: FileCheck2, title: "Cancelled cheque or bank letter", text: "PDF, or a photo of the cheque · up to 5 MB" },
 ];
 
 const FLOW = [

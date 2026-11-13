@@ -207,7 +207,7 @@ export function ApplyPage() {
       <VendorFrame step={0}>
         <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
           <Panel labelledBy="step-0-h" className="gap-3 p-4 sm:gap-[18px] sm:px-8 sm:py-7">
-            <StepTitle id="step-0-h" title="Upload your documents" text="We read the details for you, so you won't need to type them. PDF up to 5 MB." />
+            <StepTitle id="step-0-h" title="Upload your documents" text="We read the details for you, so you won't need to type them. PDF, JPG or PNG up to 5 MB. A clear phone photo works." />
             <div className="flex min-h-0 flex-1 flex-col gap-3 fit:overflow-y-auto">
               {SLOTS.map((slot) => (
                 <DocumentSlot

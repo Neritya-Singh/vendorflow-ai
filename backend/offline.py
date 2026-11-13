@@ -13,6 +13,8 @@ Nothing here is ever used when Supabase credentials are configured.
 """
 from __future__ import annotations
 
+import io
+import json
 import threading
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -259,3 +261,36 @@ class OfflineLabelExtractor:
                 ifsc=_labelled(bank_text, "IFSC", "IFSC code") if bank_text else None,
             ),
         )
+
+    def extract_images(self, gst_images: list[bytes], bank_images: list[bytes],
+                       gst_text: str = "", bank_text: str = "") -> ExtractedDocuments:
+        """TEST DOUBLE for Gemini image input. It does not look at pixels: a synthetic
+        fixture photo carries its true values in a JPEG comment, which stands in for a
+        vision model that reads the photo correctly. Without that comment (e.g. a scanned
+        PDF page) it falls back to the labelled lines of the document's OCR text, which
+        the caller passes as `*_text`. R13 grounding is always real Tesseract OCR."""
+        out = self.extract(gst_text, bank_text)
+        for images, part in ((gst_images, out.gst), (bank_images, out.bank)):
+            truth = next((t for t in map(_ground_truth, images) if t), None)
+            if truth:
+                for key, value in truth.items():
+                    if key in type(part).model_fields:
+                        setattr(part, key, value)
+        return out
+
+
+def _ground_truth(data: bytes) -> dict | None:
+    from PIL import Image
+    try:
+        comment = Image.open(io.BytesIO(data)).info.get("comment") or b""
+    except Exception:  # noqa: BLE001 - not a fixture photo
+        return None
+    if isinstance(comment, bytes):
+        comment = comment.decode("utf-8", "replace")
+    prefix = "vendorflow-test-ground-truth:"
+    if not comment.startswith(prefix):
+        return None
+    try:
+        return json.loads(comment[len(prefix):])
+    except ValueError:
+        return None

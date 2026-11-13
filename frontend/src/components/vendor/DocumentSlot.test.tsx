@@ -19,14 +19,19 @@ describe("DocumentSlot", () => {
     expect(onMove).toHaveBeenCalledOnce();
   });
 
-  it("shows the live reading stage and keeps the camera honest until photos are supported", () => {
+  it("shows the live reading stage, then offers the camera for a photo", () => {
     const { rerender } = render(
       <DocumentSlot slot="BANK" file={null} activity={{ filename: "letter.pdf", stage: "Reading the details", progress: 80 }}
         error={null} maxBytes={1} onFile={noop} onMove={noop} onRetry={null} />,
     );
     expect(screen.getByText("letter.pdf · Reading the details…")).toBeInTheDocument();
     rerender(<DocumentSlot slot="BANK" file={null} activity={null} error={null} maxBytes={1} onFile={noop} onMove={noop} onRetry={null} />);
-    expect(screen.getByRole("button", { name: /Take photo/ })).toBeDisabled();
-    expect(screen.getByText("Photos supported soon")).toBeInTheDocument();
+    const take = screen.getByRole("button", { name: "Take photo of your bank document" });
+    expect(take).toBeEnabled();
+    expect(screen.queryByText(/supported soon/)).not.toBeInTheDocument();
+    const cameraInput = document.querySelector('input[data-camera="BANK"]')!;
+    expect(cameraInput).toHaveAttribute("capture", "environment");
+    expect(cameraInput).toHaveAttribute("accept", "image/*");
+    expect(screen.getByLabelText("Cancelled cheque or bank letter file")).toHaveAttribute("accept", expect.stringContaining("image/jpeg"));
   });
 });

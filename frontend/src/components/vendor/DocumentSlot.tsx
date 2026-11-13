@@ -8,6 +8,7 @@ export const SLOT_TITLES: Record<Slot, string> = {
   BANK: "Cancelled cheque or bank letter",
 };
 export const SLOT_SHORT: Record<Slot, string> = { GST: "GST certificate", BANK: "Bank document" };
+export const ACCEPT = ".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png";
 
 export interface SlotActivity {
   filename: string;
@@ -35,6 +36,7 @@ export function DocumentSlot({ slot, file, activity, error, maxBytes, onFile, on
 }) {
   const inputId = useId();
   const input = useRef<HTMLInputElement>(null);
+  const camera = useRef<HTMLInputElement>(null);
   const [over, setOver] = useState(false);
   const title = SLOT_TITLES[slot];
   const choose = () => input.current?.click();
@@ -43,10 +45,27 @@ export function DocumentSlot({ slot, file, activity, error, maxBytes, onFile, on
       ref={input}
       id={inputId}
       type="file"
-      accept=".pdf,application/pdf"
+      accept={ACCEPT}
       className="sr-only"
       aria-label={`${title} file`}
       data-slot={slot}
+      onChange={(e) => {
+        const chosen = e.target.files?.[0];
+        e.target.value = "";
+        if (chosen) onFile(chosen);
+      }}
+    />
+  );
+  const cameraInput = (
+    <input
+      ref={camera}
+      type="file"
+      accept="image/*"
+      capture="environment"
+      className="sr-only"
+      tabIndex={-1}
+      aria-hidden
+      data-camera={slot}
       onChange={(e) => {
         const chosen = e.target.files?.[0];
         e.target.value = "";
@@ -106,7 +125,7 @@ export function DocumentSlot({ slot, file, activity, error, maxBytes, onFile, on
               <span className="text-[15px] font-semibold text-ink">{title}</span>
               <span className="text-[13px] text-muted">
                 <span className="hidden sm:inline">Drop the file here or </span>
-                <span className="font-semibold text-navy-600 underline">browse</span> · PDF up to 5 MB
+                <span className="font-semibold text-navy-600 underline">browse</span> · PDF, JPG or PNG up to 5 MB
               </span>
             </span>
           </span>
@@ -116,15 +135,19 @@ export function DocumentSlot({ slot, file, activity, error, maxBytes, onFile, on
             </span>
             <button
               type="button"
-              disabled
-              title="Photos are supported soon"
-              className="inline-flex min-h-11 cursor-not-allowed flex-col items-center justify-center rounded-xl border border-[#D0D5DD] bg-white px-3 text-[13px] font-semibold leading-tight text-[#98A2B3]"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                camera.current?.click();
+              }}
+              aria-label={`Take photo of your ${SLOT_SHORT[slot].toLowerCase()}`}
+              className="inline-flex min-h-11 items-center justify-center gap-1.5 rounded-xl border border-[#D0D5DD] bg-white px-3 text-sm font-semibold text-navy-700 hover:border-navy-300 sm:hidden"
             >
-              <span className="inline-flex items-center gap-1.5"><Camera className="size-4" aria-hidden /> Take photo</span>
-              <span className="text-[11px] font-medium">Photos supported soon</span>
+              <Camera className="size-4" aria-hidden /> Take photo
             </button>
           </span>
           {picker}
+          {cameraInput}
         </label>
         {note ? <p className="text-[13px] text-muted">{note}</p> : null}
         {errorLine}

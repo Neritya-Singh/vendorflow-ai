@@ -1,5 +1,6 @@
 # VendorFlow v2 API server (no Streamlit). Shared v1.1 pins are repeated exactly.
 pymupdf==1.28.2
+pillow==13.0.0
 pydantic==2.14.2
 google-genai==2.34.0
 python-dotenv==1.2.4

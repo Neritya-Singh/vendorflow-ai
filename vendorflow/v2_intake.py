@@ -14,7 +14,9 @@ same deterministic rules, R13 grounding and records screening run on submit.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+from uuid import uuid4
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -23,11 +25,12 @@ from pydantic import Field
 
 from . import v2_policy as v2
 from .models import BankExtraction, ExtractedDocuments, GSTExtraction, StageEvent, VendorSubmission, WorkflowResult
-from .pdf_reader import PDFInput, ReadPDF, read_pdf
+from .pdf_reader import PDFInput, ReadPDF
 from .persistence import (
     PersistenceError, SupabaseRepository, UnauthorizedTracking, _token_digest,
 )
 from .pipeline import ProcessingPipeline, StageCallback
+from .v2_scan import OCR_UNAVAILABLE, ReadDocument, content_type, file_kind, read_document
 from .rules import EMAIL_PATTERN, GST_STATE_CODES, GSTIN_PATTERN, IFSC_PATTERN, norm_id, norm_state
 
 SLOTS = ("GST", "BANK")
@@ -100,9 +103,10 @@ class CachedExtractor:
     """Extractor that answers from the per-file upload cache; only a miss reaches the
     provider (and then only for the missing document)."""
 
-    def __init__(self, inner, cache: dict[tuple[str, str], dict]):
+    def __init__(self, inner, cache: dict[tuple[str, str], dict], scans: dict[str, ReadDocument | None] | None = None):
         self.inner = inner
         self.cache = cache
+        self.scans = scans or {}
         self.provider_calls = 0
         self.last_diagnostic = None
 
@@ -111,7 +115,10 @@ class CachedExtractor:
         bank = self.cache.get(("BANK", text_sha(bank_text))) if bank_text.strip() else None
         result = ExtractedDocuments.empty()
         if (gst_text.strip() and gst is None) or (bank_text.strip() and bank is None):
-            fresh = self.inner.extract(gst_text if gst is None else "", bank_text if bank is None else "")
+            need_gst, need_bank = gst_text if gst is None else "", bank_text if bank is None else ""
+            fresh = provider_extract(self.inner, need_gst, need_bank,
+                                     self.scans.get("GST") if need_gst else None,
+                                     self.scans.get("BANK") if need_bank else None)
             self.provider_calls += 1
             self.last_diagnostic = getattr(self.inner, "last_diagnostic", None)
             result = fresh
@@ -120,6 +127,61 @@ class CachedExtractor:
         if bank is not None:
             result.bank = BankExtraction(**bank)
         return result
+
+
+def provider_extract(extractor, gst_text: str, bank_text: str,
+                     gst_scan: ReadDocument | None = None, bank_scan: ReadDocument | None = None) -> ExtractedDocuments:
+    """Photos and scans go to the provider as images (their OCR text is only for R13
+    grounding); text PDFs go as text. One call for whatever needs reading."""
+    scanned = [s for s in (gst_scan, bank_scan) if s is not None and getattr(s, "ocr", False) and s.images]
+    if scanned and hasattr(extractor, "extract_images"):
+        g_img = list(gst_scan.images) if gst_scan in scanned else []
+        b_img = list(bank_scan.images) if bank_scan in scanned else []
+        # The OCR text of a scanned document is passed only so the OFFLINE test double can
+        # fall back to it; the real provider ignores the text of a document given as images.
+        return extractor.extract_images(g_img, b_img, gst_text, bank_text)
+    return extractor.extract(gst_text, bank_text)
+
+
+def store_document(repo: SupabaseRepository, application_id: str, slot: str, upload: PDFInput) -> dict:
+    """v2 counterpart of SupabaseRepository.upload_document for PDF, JPG and PNG files
+    (the original file is kept as evidence; same versioning, hash and compensation)."""
+    if slot not in SLOTS:
+        raise ValueError("Unknown document type")
+    kind = file_kind(upload.filename, upload.content)
+    if kind == "pdf":
+        return repo.upload_document(application_id, slot, upload)
+    old = repo._latest_document_row(application_id, slot)
+    version = int(old["version"]) + 1 if old else 1
+    sha = hashlib.sha256(upload.content).hexdigest()
+    ext = os.path.splitext(upload.filename.casefold())[1]
+    path = f"{application_id}/{slot}/v{version}-{uuid4().hex}{ext}"
+    stored = False
+    try:
+        repo.client.storage.from_(repo.BUCKET).upload(
+            path=path, file=upload.content,
+            file_options={"content-type": content_type(upload.filename), "upsert": "false"})
+        stored = True
+        row = {"application_id": application_id, "doc_type": slot, "storage_path": path,
+               "file_sha256": sha, "version": version, "filename": upload.filename}
+        response = repo.client.table("documents").insert(row).execute()
+        if not response.data:
+            raise RuntimeError("No confirmed document metadata row")
+        return response.data[0]
+    except Exception as exc:
+        if stored:
+            try:
+                confirmed = (repo.client.table("documents").select("*")
+                             .eq("storage_path", path).limit(1).execute().data)
+                if confirmed and confirmed[0]["file_sha256"] == sha:
+                    return confirmed[0]
+            except Exception:
+                pass
+            try:
+                repo.client.storage.from_(repo.BUCKET).remove([path])
+            except Exception:
+                pass
+        raise PersistenceError("The upload could not be saved. Try again.") from exc
 
 
 # ---------------------------------------------------------------- helpers
@@ -199,7 +261,7 @@ def contact_errors(contact: dict) -> dict[str, str]:
 
 _FILE_MESSAGES = {
     "nothing_found": "We couldn't find the details on this document. Check it's the right file or upload a clearer copy.",
-    "unreadable": "We couldn't read this file. Upload a PDF with selectable text. Scans and photos are supported soon.",
+    "unreadable": "We couldn't read this file. Upload a clearer copy: a sharp, well-lit photo or a PDF.",
     "unavailable": ("We couldn't read this file just now because of a temporary problem on our side. "
                     "This isn't a problem with your file. Type the details from it on the next step."),
 }
@@ -414,7 +476,7 @@ class DraftService:
             if slot not in SLOTS:
                 continue
             row = self._own_document(application_id, str(item["id"]))
-            read = read_pdf(self.repo._download_verified(row))
+            read = read_document(self.repo._download_verified(row))
             fields = (extracted.get("gst" if slot == "GST" else "bank") or {})
             kind = classify_document(read)
             entry = {"document_id": str(row["id"]), "version": int(row["version"]), "filename": row.get("filename"),
@@ -451,9 +513,12 @@ class DraftService:
         return v2.fix_items(run, review)
 
     # --- files
-    def _extract_one(self, slot: str, text: str) -> dict:
+    def _extract_one(self, slot: str, read: ReadPDF) -> dict:
         extractor = self.extractor_factory()
-        out = extractor.extract(text, "") if slot == "GST" else extractor.extract("", text)
+        if slot == "GST":
+            out = provider_extract(extractor, read.text, "", gst_scan=read)  # type: ignore[arg-type]
+        else:
+            out = provider_extract(extractor, "", read.text, bank_scan=read)  # type: ignore[arg-type]
         return (out.gst if slot == "GST" else out.bank).model_dump()
 
     def _process(self, application_id: str, slot: str, pdf: PDFInput, read: ReadPDF, cache: dict,
@@ -462,7 +527,7 @@ class DraftService:
         if self._count_documents(application_id) - doc_base >= MAX_DRAFT_DOCUMENTS:
             raise DraftLimit("Too many uploads for this application. Contact the finance team if you need help.")
         emit("U1", "STARTED", "")
-        row = self.repo.upload_document(application_id, slot, pdf)
+        row = store_document(self.repo, application_id, slot, pdf)
         emit("U1", "COMPLETED", "")
         emit("U2", "STARTED", "")
         kind = classify_document(read)
@@ -470,7 +535,10 @@ class DraftService:
         entry = {"document_id": str(row["id"]), "version": int(row["version"]), "filename": pdf.filename,
                  "sha256": row["file_sha256"], "pages": read.pages, "kind": kind, "uploaded_at": _now()}
         new_cache: dict = {}
-        if not read.readable:
+        if not read.readable and read.issue == OCR_UNAVAILABLE:
+            entry["status"] = "unavailable"  # our side, not the vendor's file
+            emit("U3", "FAILED", "")
+        elif not read.readable:
             entry["status"] = "unreadable"
             emit("U3", "SKIPPED", "")
         elif kind and kind != slot:
@@ -484,7 +552,7 @@ class DraftService:
                 fields = hit["fields"]
             else:
                 try:
-                    fields = self._extract_one(slot, read.text)
+                    fields = self._extract_one(slot, read)
                 except Exception:  # provider outage: sanitised, never the provider text
                     entry["status"] = "unavailable"
                     emit("U3", "FAILED", "")
@@ -518,7 +586,7 @@ class DraftService:
         if slot not in SLOTS:
             raise DraftInvalid("Unknown document slot.")
         _app, draft, _guard = self._load(application_id, kind)
-        entry, cache = self._process(application_id, slot, pdf, read_pdf(pdf), draft.get("cache") or {},
+        entry, cache = self._process(application_id, slot, pdf, read_document(pdf), draft.get("cache") or {},
                                      _emitter(stage_callback), int(draft.get("doc_base") or 0))
         return self._place(application_id, [(slot, entry)], cache, kind=kind)
 
@@ -539,7 +607,7 @@ class DraftService:
         emit = _emitter(stage_callback)
         for entry, target in moves:
             pdf = self.repo._download_verified(self._own_document(application_id, entry["document_id"]))
-            moved, added = self._process(application_id, target, pdf, read_pdf(pdf), cache, emit,
+            moved, added = self._process(application_id, target, pdf, read_document(pdf), cache, emit,
                                          int(draft.get("doc_base") or 0))
             placements.append((target, moved))
             new_cache.update(added)
@@ -649,8 +717,10 @@ class DraftService:
             hit = (draft.get("cache") or {}).get(f"{slot}:{entry['sha256']}")
             if hit:
                 cache[(slot, hit["text_sha"])] = hit["fields"]
-        extractor = CachedExtractor(self.extractor_factory(), cache)
-        engine = ProcessingPipeline(extractor, approved_lookup=self.repo.approved_lookup, **self.pipeline_options)
+        scans = {slot: read_document(upload) for slot, upload in uploads.items()}
+        extractor = CachedExtractor(self.extractor_factory(), cache, scans)
+        options = {**self.pipeline_options, "reader": read_document}
+        engine = ProcessingPipeline(extractor, approved_lookup=self.repo.approved_lookup, **options)
         result = engine.evaluate(vendor, uploads["GST"], uploads["BANK"], application_id=application_id,
                                  trigger=trigger, stage_callback=stage_callback, persistence_planned=True)
         try:

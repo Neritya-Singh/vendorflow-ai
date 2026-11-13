@@ -32,6 +32,7 @@ from vendorflow.persistence import (
 from vendorflow.pipeline import MinimumIntakeError
 from vendorflow.rules import GST_STATE_CODES, normalize_submission
 from vendorflow.ux_support import committed_pdf_types
+from vendorflow.v2_scan import content_type as doc_content_type, file_kind
 from vendorflow.v2_intake import DraftInvalid, DraftLimit, DraftSubmitted, V2Submission, draft_view, fix_view
 
 from . import presenters
@@ -49,6 +50,7 @@ RUN_ID = re.compile(r"^RUN-[0-9A-F]{12}$")
 MAX_REQUEST_BYTES = 2 * MAX_PDF_BYTES + 512 * 1024
 MAX_PREVIEW_PAGES = 10
 PDF_MIME = {"application/pdf", "application/x-pdf"}
+DOC_MIME = PDF_MIME | {"image/jpeg", "image/png"}
 
 
 class Credentials(BaseModel):
@@ -143,10 +145,21 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         status, _kind, message = safe_error(exc)
         return HTTPException(status_code=status, detail=message)
 
-    async def read_upload(upload: UploadFile | None, label: str) -> PDFInput | None:
+    async def read_upload(upload: UploadFile | None, label: str, *, images: bool = False) -> PDFInput | None:
         if upload is None or not (upload.filename or "").strip():
             return None
         name = upload.filename.replace("\\", "/").rsplit("/", 1)[-1][:120]
+        if images:  # v2 B7 draft/fix uploads: PDF (text or scanned), JPG or PNG
+            if (upload.content_type or "").split(";")[0].strip().lower() not in DOC_MIME:
+                raise HTTPException(400, f"{label}: upload a PDF, JPG or PNG file.")
+            content = await upload.read(MAX_PDF_BYTES + 1)
+            if len(content) > MAX_PDF_BYTES:
+                raise HTTPException(413, f"{label}: the file exceeds 5 MB. Upload a smaller file.")
+            try:
+                file_kind(name, content)
+            except UploadError as exc:
+                raise HTTPException(400, f"{label}: {exc}") from None
+            return PDFInput(name, content)
         if not name.casefold().endswith(".pdf"):
             raise HTTPException(400, f"{label}: only .pdf files are accepted.")
         if (upload.content_type or "").split(";")[0].strip().lower() not in PDF_MIME:
@@ -410,7 +423,7 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         slot: Literal["GST", "BANK"] = Form(...), file: UploadFile = File(...),
     ):
         application_id = application_id.strip().upper()
-        pdf = await read_upload(file, "GST certificate" if slot == "GST" else "Bank document")
+        pdf = await read_upload(file, "GST certificate" if slot == "GST" else "Bank document", images=True)
         if pdf is None:
             raise HTTPException(400, "Choose a file to upload.")
         draft_auth(request, application_id, tracking_code, create=True)
@@ -503,7 +516,7 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         request: Request, application_id: str = Form(...), tracking_code: str = Form(...),
         slot: Literal["GST", "BANK"] = Form(...), file: UploadFile = File(...),
     ):
-        pdf = await read_upload(file, "GST certificate" if slot == "GST" else "Bank document")
+        pdf = await read_upload(file, "GST certificate" if slot == "GST" else "Bank document", images=True)
         if pdf is None:
             raise HTTPException(400, "Choose a file to upload.")
         application_id = fix_auth(request, application_id, tracking_code)
@@ -670,12 +683,20 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             raise fail(exc) from None
         if pdf is None:
             raise HTTPException(404, "No PDF of this type was used in that run.")
-        filename = presenters.SAFE_FILENAME.sub("_", f"{application_id}_{run_id}_{doc_type}.pdf")
-        return Response(pdf.content, media_type="application/pdf", headers={
+        ext = "." + pdf.filename.rsplit(".", 1)[-1].casefold() if "." in pdf.filename else ".pdf"
+        ext = ext if ext in (".pdf", ".jpg", ".jpeg", ".png") else ".pdf"
+        filename = presenters.SAFE_FILENAME.sub("_", f"{application_id}_{run_id}_{doc_type}{ext}")
+        return Response(pdf.content, media_type=doc_content_type(filename), headers={
             "Content-Disposition": f'inline; filename="{filename}"',
             "Cache-Control": "private, no-store",
             "Content-Security-Policy": "sandbox; default-src 'none'; object-src 'self'",
         })
+
+    def viewer_type(doc) -> str:
+        try:
+            return file_kind(doc.filename, doc.content)  # pdf | jpeg | png (a photo is one page)
+        except UploadError:
+            return "pdf"
 
     def load_pdf(application_id: str, run_id: str, doc_type: str):
         valid_app_id(application_id)
@@ -695,7 +716,7 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         """Page count for the in-app viewer (hash-verified committed document)."""
         pdf = load_pdf(application_id, run_id, doc_type)
         try:
-            with pymupdf.open(stream=pdf.content, filetype="pdf") as doc:
+            with pymupdf.open(stream=pdf.content, filetype=viewer_type(pdf)) as doc:
                 return {"pages": min(doc.page_count, MAX_PREVIEW_PAGES), "total_pages": doc.page_count}
         except Exception:
             raise HTTPException(422, "This document can't be previewed. Open the original instead.") from None
@@ -709,7 +730,7 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             raise HTTPException(404, "Page not found.")
         pdf = load_pdf(application_id, run_id, doc_type)
         try:
-            with pymupdf.open(stream=pdf.content, filetype="pdf") as doc:
+            with pymupdf.open(stream=pdf.content, filetype=viewer_type(pdf)) as doc:
                 if page > doc.page_count:
                     raise HTTPException(404, "Page not found.")
                 png = doc[page - 1].get_pixmap(dpi=144).tobytes("png")

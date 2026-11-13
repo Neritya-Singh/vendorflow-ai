@@ -233,7 +233,7 @@ def test_unreadable_file_asks_for_a_clearer_copy(client):
     c = creds(client)
     view = draft_of(upload(client, c, "GST", blank_pdf()))
     assert view["files"]["GST"]["status"] == "unreadable"
-    assert "Scans and photos are supported soon" in view["files"]["GST"]["message"]
+    assert "Upload a clearer copy" in view["files"]["GST"]["message"]  # blank scan: OCR finds no text
     assert field(view, "gstin")["status"] == "unread"
 
 
