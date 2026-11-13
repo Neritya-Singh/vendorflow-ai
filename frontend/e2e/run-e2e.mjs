@@ -128,21 +128,27 @@ try {
   const masked = await ap.locator("table").first().textContent();
   check("B admin comparison masks account number by default", !masked.includes(ec2.account_number) && masked.includes("•"));
   await shot(ap, "08-admin-case");
-  await ap.getByText("Request correction", { exact: true }).click();
-  await ap.getByLabel("What should the vendor change?").fill("Upload a bank letter showing the company's legal name as account holder.");
-  await ap.getByRole("button", { name: "Send correction request…" }).click();
+  // Keyboard: C opens the correction dialog with a message pre-drafted from the flagged items.
+  await ap.keyboard.press("c");
   const dialog = ap.getByRole("dialog");
   await dialog.waitFor();
-  check("B confirm button disabled until case ID confirmed", await dialog.getByRole("button", { name: "Send correction request" }).isDisabled());
-  await dialog.getByRole("checkbox").check();
-  await shot(ap, "09-admin-confirm", false);
-  await dialog.getByRole("button", { name: "Send correction request" }).click();
-  await ap.getByText(`Request correction recorded for ${B.id}`).waitFor();
-  check("B correction request saved server-side", true);
+  const draft = await dialog.getByLabel("Message to the vendor").inputValue();
+  check("B 'C' opens a pre-drafted correction request", draft.includes("as the account holder"), draft);
+  await dialog.getByLabel("Message to the vendor").fill("Upload a bank letter showing the company's legal name as account holder.");
+  check("B dialog previews the exact vendor message", (await dialog.textContent()).includes("Our team needs one change: Upload a bank letter"));
+  await shot(ap, "09-admin-correction-dialog", false);
+  await dialog.getByRole("button", { name: "Send request" }).click();
+  await ap.getByText("Decision saved · Message added for vendor").waitFor();
+  check("B correction saved with honest toast", true);
+  await ap.waitForURL(/\/admin(\?.*)?$/);
+  check("B auto-advances (no more cases needing review → back to the queue)", true);
 
   await track(page, BASE, B.id, B.code);
   await page.getByText("Upload a bank letter showing the company's legal name").first().waitFor();
   check("B vendor sees reviewer message", true);
+  const log = await page.locator("section", { hasText: "Messages from our team" }).first().textContent();
+  check("B vendor message log lists the correction and the earlier outcome", log.includes("Our team needs one change")
+    && log.includes("with our team for a final check") && !/email sent/i.test(log));
   await shot(page, "10-track-correction-requested");
   await page.getByLabel("Account holder name").fill(ec2.legal_name);
   await page.locator('input[type="file"]').nth(1).setInputFiles(pdf("happy", "bank"));
@@ -172,16 +178,48 @@ try {
   check("I vendor sees only the neutral 'additional check' line", iText.includes("Our team is completing an additional check")
     && !iText.includes(B.id) && !/fraud|duplicate|suspicious/i.test(iText));
   await ap.goto(`${BASE}/admin`);
+  await ap.locator("tbody tr").first().waitFor();
   const iRow = await ap.locator("tbody tr").first().textContent();
   check("I queue puts the high-risk case first with its reason", iRow.includes(I.id)
     && iRow.includes("Same GSTIN as an approved vendor, different bank account") && iRow.includes("High"), iRow);
-  await ap.locator("tbody tr").first().click();
+  await ap.keyboard.press("/");
+  check("'/' focuses queue search", await ap.evaluate(() => document.activeElement?.getAttribute("aria-label") === "Search applications"));
+  await ap.keyboard.press("Escape");
+  await ap.keyboard.press("k");
+  await ap.keyboard.press("Enter");
   await ap.getByText("Linked record").waitFor();
   const linked = await ap.locator("section", { hasText: "Linked record" }).first().textContent();
   check("I case links the approved record and flags the differing account", linked.includes(`Open ${B.id}`)
     && /Account no\.[^A-Za-z]*Differs/.test(linked), linked.slice(0, 160));
   check("I linked comparison keeps account numbers masked", !linked.includes(ec3.account_number) && !linked.includes(ec2.account_number));
   await shot(ap, "09b-admin-linked-record");
+  await ap.keyboard.press("?");
+  await ap.getByRole("dialog", { name: "Keyboard shortcuts" }).waitFor();
+  check("'?' shows the shortcut list", true);
+  await ap.keyboard.press("Escape");
+  await ap.keyboard.press("a");
+  const approve = ap.getByRole("dialog", { name: "Approve application" });
+  await approve.waitFor();
+  await approve.getByRole("button", { name: "Documents consistent after manual check" }).click();
+  check("I approval of a matched case blocked until call-back confirmed", await approve.getByRole("button", { name: "Approve" }).isDisabled());
+  await shot(ap, "09c-admin-approve-confirmation", false);
+  const serverGuard = await ap.evaluate(async (id) => {
+    const c = await (await fetch(`/api/admin/applications/${id}`)).json();
+    const s = await (await fetch("/api/admin/session")).json();
+    const r = await fetch(`/api/admin/applications/${id}/review`, { method: "POST", headers: { "content-type": "application/json", "x-csrf-token": s.csrf_token },
+      body: JSON.stringify({ action: "APPROVE", reason: "Bypassing the UI", expected_revision: c.revision, expected_latest_run_id: c.latest_run_id }) });
+    return r.status;
+  }, I.id);
+  check("I server refuses approval without the confirmation", serverGuard === 400, `${serverGuard}`);
+  await ap.keyboard.press("Escape");
+  await ap.keyboard.press("r");
+  const reject = ap.getByRole("dialog", { name: "Reject application" });
+  await reject.waitFor();
+  await reject.getByRole("button", { name: "Bank account not owned by the business" }).click();
+  await shot(ap, "09d-admin-reject-dialog", false);
+  await reject.getByRole("button", { name: "Reject" }).click();
+  await ap.getByText("Decision saved · Message added for vendor").waitFor();
+  check("I rejected via keyboard with a quick reason", true);
 
   // ------------------------------------------------------------ C. swapped PDFs
   const acme = fixture("happy");

@@ -62,7 +62,7 @@ export const api = {
     request<{ rows: ComparisonRow[] }>(`/api/admin/applications/${encodeURIComponent(id)}/reveal`),
   review: (
     id: string,
-    body: { action: string; reason: string; expected_revision: number; expected_latest_run_id: string },
+    body: { action: string; reason: string; expected_revision: number; expected_latest_run_id: string; confirmation?: string },
   ) =>
     request<AdminCase>(`/api/admin/applications/${encodeURIComponent(id)}/review`, {
       method: "POST",

@@ -92,6 +92,52 @@ def vendor_stage_rows(events: list[dict]) -> list[dict]:
     return [{**row, "label": VENDOR_STAGES[row["stage_id"]], "note": ""} for row in stage_summary(events)]
 
 
+DELIVERY_NOTE = "Message added to the vendor's application page (no email sent)"
+
+
+def _vendor_reason(review: dict) -> str:
+    reason, _confirmation = v2.split_confirmation(str(review.get("reason") or ""))
+    return vendor_safe_review_reason(reason.strip())
+
+
+def message_log(runs: list[dict], reviews: list[dict], *, buyer: str = "Zamp AI") -> list[dict]:
+    """One vendor message per saved outcome and per reviewer action (V2_02 §9).
+
+    Derived from the immutable runs and review_actions, so it cannot drift from
+    the audit trail. Nothing is emailed: each entry says where it was delivered.
+    """
+    approved = f"Your business is approved as a supplier to {buyer}."
+    messages = []
+    for run in runs:
+        if run.get("status") == "APPROVED":
+            title, text = "Approved", approved
+        else:
+            items = v2.vendor_items(run)
+            if items:
+                listed = "; ".join(i["text"].rstrip(".") for i in items)
+                title = "Action needed from you"
+                text = f"We need a few things before we can continue: {listed}. Open your application page to fix them."
+            else:
+                title, text = "With our team", v2.vendor_team_message(run)
+        messages.append({"id": f"run:{run.get('id')}", "at": _iso(run.get("created_at") or run.get("finished_at")),
+                         "source": "Automated check", "title": title, "text": text, "delivery": DELIVERY_NOTE})
+    for review in reviews:
+        action = str(review.get("action"))
+        reason = _vendor_reason(review)
+        if action == "REQUEST_CORRECTION":
+            title = "Our team asked for a change"
+            text = f"Our team needs one change: {reason.rstrip('.')}. Open your application page to make it."
+        elif action == "APPROVE":
+            title, text = "Approved", approved
+        else:
+            title = "Not approved"
+            text = f"We couldn't approve your application: {reason.rstrip('.')}. Questions: contact {buyer}'s finance team."
+        messages.append({"id": f"review:{review.get('id') or review.get('created_at')}", "at": _iso(review.get("created_at")),
+                         "source": "Reviewer action", "title": title, "text": text, "delivery": DELIVERY_NOTE})
+    messages.sort(key=lambda m: m.get("at") or "", reverse=True)
+    return messages
+
+
 def vendor_view(record: dict, runs: list[dict], reviews: list[dict], *, buyer: str = "Zamp AI") -> dict:
     """Vendor-safe status: who acts next and exactly what is needed (V2_02 §6–9).
 
@@ -103,7 +149,7 @@ def vendor_view(record: dict, runs: list[dict], reviews: list[dict], *, buyer: s
     latest_review = reviews[0] if reviews else None
     owner = v2.case_owner(record, latest_run, latest_review)
     correction = active_review_request(latest_review, latest_run)
-    review_reason = vendor_safe_review_reason(str((latest_review or {}).get("reason") or ""))
+    review_reason = _vendor_reason(latest_review or {})
     todo: list[dict] = []
     retry_available = False
 
@@ -140,8 +186,10 @@ def vendor_view(record: dict, runs: list[dict], reviews: list[dict], *, buyer: s
 
     reviewer_note = None
     # A final reviewer decision always shows; a correction request only while active.
+    # Rejection reasons and active correction requests are for the vendor; an
+    # approval reason is an internal audit note and is never shown to the vendor.
     if latest_review and (
-        (latest_review.get("action") != "REQUEST_CORRECTION" and record.get("decision_source") == "MANUAL")
+        (latest_review.get("action") == "REJECT" and record.get("decision_source") == "MANUAL")
         or correction
     ):
         reviewer_note = {
@@ -166,11 +214,12 @@ def vendor_view(record: dict, runs: list[dict], reviews: list[dict], *, buyer: s
             "kind": "review", "at": _iso(review.get("created_at")),
             "title": VENDOR_REVIEW_LABELS.get(str(review.get("action")), "Message from our team"),
             "status": {"APPROVE": "APPROVED", "REJECT": "REJECTED"}.get(str(review.get("action")), "PENDING"),
-            "message": vendor_safe_review_reason(str(review.get("reason") or "")),
+            "message": "" if review.get("action") == "APPROVE" else _vendor_reason(review),
         })
     timeline.sort(key=lambda item: item.get("at") or "", reverse=True)
 
     return {
+        "messages": message_log(runs, reviews, buyer=buyer),
         "application_id": record.get("id"),
         "status": status, "status_label": status_label,
         "decision_source": record.get("decision_source") or "AUTOMATED",
@@ -206,8 +255,9 @@ def receipt_view(application_id: str, result: WorkflowResult, vendor: dict, mani
 # ---------------------------------------------------------------- admin views
 
 def _review_dict(row: dict) -> dict:
+    reason, confirmation = v2.split_confirmation(str(row.get("reason") or ""))
     return {"action": row.get("action"), "label": REVIEW_ACTION_LABELS.get(str(row.get("action")), row.get("action")),
-            "reason": row.get("reason"), "actor": row.get("actor"),
+            "reason": reason, "confirmation": confirmation, "actor": row.get("actor"),
             "reviewed_run_id": row.get("reviewed_run_id"), "created_at": _iso(row.get("created_at"))}
 
 
@@ -330,7 +380,8 @@ def linked_records(app: dict, run: dict | None, others: list[dict]) -> list[dict
     return out
 
 
-def admin_case(app: dict, runs: list[dict], reviews: list[dict], linked: list[dict] | None = None) -> dict:
+def admin_case(app: dict, runs: list[dict], reviews: list[dict], linked: list[dict] | None = None,
+               *, buyer: str = "Zamp AI") -> dict:
     latest_run = runs[0] if runs else None
     latest_review = reviews[0] if reviews else None
     checks = (latest_run or {}).get("checks_json") or []
@@ -354,6 +405,10 @@ def admin_case(app: dict, runs: list[dict], reviews: list[dict], linked: list[di
         "runs": [_run_detail(r) for r in runs],
         "reviews": [_review_dict(r) for r in reviews],
         "linked_records": linked_records(app, latest_run, linked or []),
+        "messages": message_log(runs, reviews, buyer=buyer),
+        "correction_draft": v2.correction_draft(latest_run, str(payload.get("legal_name") or "")),
+        "requires_confirmation": app.get("current_status") == "PENDING" and v2.requires_confirmation(latest_run),
+        "confirmation_text": v2.BANK_CHANGE_CONFIRMATION,
         "can_review": app.get("current_status") == "PENDING" and bool(latest_run),
         "active_correction_request": active_review_request(latest_review, latest_run),
     }

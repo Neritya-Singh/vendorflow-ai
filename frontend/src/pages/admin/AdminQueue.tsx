@@ -1,11 +1,11 @@
 import { ChevronRight, Inbox, RefreshCw, Search } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { Alert, Button, Card, EmptyState, Input, Pill, RiskTag, Select, Spinner, StatusBadge, cx } from "../../components/ui";
-import { api } from "../../lib/api";
 import { formatDateTime } from "../../lib/format";
-import type { Overview, QueueRow, QueueTab } from "../../lib/types";
-import { useAdmin } from "./AdminLayout";
+import type { QueueRow } from "../../lib/types";
+import { TABS, TAB_IDS, type Tab, useOverview } from "./queueState";
+import { useShortcuts } from "../../lib/useShortcuts";
 
 function Metric({ label, value, tone, sub }: { label: string; value: string | number; tone?: "amber" | "teal" | "red"; sub?: string }) {
   return (
@@ -19,38 +19,6 @@ function Metric({ label, value, tone, sub }: { label: string; value: string | nu
   );
 }
 
-export function useOverview() {
-  const { onUnauthorized } = useAdmin();
-  const [data, setData] = useState<Overview | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const load = useCallback(() => {
-    setLoading(true);
-    api
-      .overview()
-      .then((d) => {
-        setData(d);
-        setError(null);
-      })
-      .catch((e: Error) => {
-        if (!onUnauthorized(e)) setError(e.message);
-      })
-      .finally(() => setLoading(false));
-  }, [onUnauthorized]);
-  useEffect(load, [load]);
-  return { data, error, loading, reload: load };
-}
-
-type Tab = QueueTab | "ALL";
-const TABS: { id: Tab; label: string }[] = [
-  { id: "NEEDS_REVIEW", label: "Needs review" },
-  { id: "WAITING_ON_VENDOR", label: "Waiting on vendor" },
-  { id: "APPROVED", label: "Approved" },
-  { id: "REJECTED", label: "Rejected" },
-  { id: "ALL", label: "All" },
-];
-const TAB_IDS = TABS.map((t) => t.id);
-
 function OwnerTag({ row }: { row: QueueRow }) {
   if (row.status !== "PENDING") return <StatusBadge status={row.status} />;
   return <Pill tone={row.owner === "VENDOR" ? "amber" : "navy"}>{row.owner_label}</Pill>;
@@ -63,7 +31,14 @@ export function AdminQueue() {
   const requested = params.get("tab") as Tab | null;
   const tab: Tab = requested && TAB_IDS.includes(requested) ? requested : "NEEDS_REVIEW";
   const [search, setSearch] = useState("");
-  const setTab = (t: Tab) => setParams(t === "NEEDS_REVIEW" ? {} : { tab: t });
+  const [active, setActive] = useState(0);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const tbody = useRef<HTMLTableSectionElement>(null);
+  const setTab = (t: Tab) => {
+    setActive(0);
+    setParams(t === "NEEDS_REVIEW" ? {} : { tab: t });
+  };
+  const caseUrl = (id: string) => `/admin/cases/${id}${tab === "NEEDS_REVIEW" ? "" : `?tab=${tab}`}`;
 
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -71,6 +46,17 @@ export function AdminQueue() {
       (r) => (tab === "ALL" || r.tab === tab) && (!q || `${r.application_id} ${r.business} ${r.gstin}`.toLowerCase().includes(q)),
     );
   }, [data, tab, search]);
+
+  useEffect(() => setActive((a) => Math.min(a, Math.max(rows.length - 1, 0))), [rows.length]);
+  useEffect(() => {
+    tbody.current?.querySelector<HTMLElement>(`[data-row="${active}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [active]);
+  useShortcuts({
+    j: () => setActive((a) => Math.min(a + 1, rows.length - 1)),
+    k: () => setActive((a) => Math.max(a - 1, 0)),
+    Enter: () => rows[active] && navigate(caseUrl(rows[active].application_id)),
+    "/": () => searchRef.current?.focus(),
+  });
 
   const m = data?.metrics;
   const count = (t: Tab) =>
@@ -116,7 +102,17 @@ export function AdminQueue() {
           </Select>
           <div className="relative ml-auto w-full sm:w-72">
             <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" aria-hidden />
-            <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, ID or GSTIN" className="pl-9" aria-label="Search applications" />
+            <Input
+              ref={searchRef}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") e.currentTarget.blur();
+              }}
+              placeholder="Search name, ID or GSTIN  ( / )"
+              className="pl-9"
+              aria-label="Search applications"
+            />
           </div>
         </div>
 
@@ -139,11 +135,17 @@ export function AdminQueue() {
                   <th scope="col" className="w-8"><span className="sr-only">Open</span></th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
-                {rows.map((r) => (
-                  <tr key={r.application_id} className="cursor-pointer hover:bg-slate-50" onClick={() => navigate(`/admin/cases/${r.application_id}`)}>
+              <tbody ref={tbody} className="divide-y divide-slate-100">
+                {rows.map((r, i) => (
+                  <tr
+                    key={r.application_id}
+                    data-row={i}
+                    aria-selected={i === active}
+                    className={cx("cursor-pointer hover:bg-slate-50", i === active && "bg-navy-50 shadow-[inset_3px_0_0_var(--color-navy-600)]")}
+                    onClick={() => navigate(caseUrl(r.application_id))}
+                  >
                     <td className="px-4 py-3">
-                      <Link to={`/admin/cases/${r.application_id}`} className="font-medium text-slate-900 hover:text-navy-700" onClick={(e) => e.stopPropagation()}>
+                      <Link to={caseUrl(r.application_id)} className="font-medium text-slate-900 hover:text-navy-700" onClick={(e) => e.stopPropagation()}>
                         {r.business || "Unnamed business"}
                       </Link>
                       <p className="font-mono text-xs text-slate-500">{r.application_id}{r.gstin ? ` · ${r.gstin}` : ""}</p>
@@ -160,7 +162,12 @@ export function AdminQueue() {
           </div>
         )}
       </Card>
-      <p className="mt-3 text-xs text-slate-500">
+      <p className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500" aria-label="Keyboard shortcuts">
+        <span><kbd className="font-mono">J</kbd> / <kbd className="font-mono">K</kbd> move down / up</span>
+        <span><kbd className="font-mono">Enter</kbd> open case</span>
+        <span><kbd className="font-mono">/</kbd> search</span>
+      </p>
+      <p className="mt-1 text-xs text-slate-500">
         Synthetic test data. Figures come from saved records; applications that were never submitted are not counted.
       </p>
     </div>

@@ -1,22 +1,19 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import {
-  ArrowLeft, CheckCircle2, ChevronDown, Eye, EyeOff, FileText, Gavel, MessageSquareWarning, RefreshCw, ShieldCheck, X, XCircle,
+  ArrowLeft, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Eye, EyeOff, FileText, Keyboard, ShieldCheck, X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { DECISIONS, DecisionDialog, type Decision } from "../../components/admin/DecisionDialog";
+import { MessageList } from "../../components/MessageLog";
+import { useShortcuts } from "../../lib/useShortcuts";
+import { TAB_IDS, type Tab, useOverview } from "./queueState";
 import { StageList } from "../../components/StageList";
-import { Alert, Button, Card, CardHeader, CheckIcon, KeyValue, Pill, RiskTag, Spinner, StatusBadge, Textarea, cx } from "../../components/ui";
-import { ApiError, api } from "../../lib/api";
+import { Alert, Button, Card, CardHeader, CheckIcon, KeyValue, Pill, RiskTag, Spinner, StatusBadge, cx } from "../../components/ui";
+import { api } from "../../lib/api";
 import { formatDateTime, formatDuration } from "../../lib/format";
 import type { AdminCase as Case, ComparisonRow, LinkedRecord, RunDetail } from "../../lib/types";
 import { useAdmin } from "./AdminLayout";
-
-type Action = "REQUEST_CORRECTION" | "APPROVE" | "REJECT";
-const ACTIONS: { id: Action; label: string; verb: string; icon: typeof Gavel; tone: string; help: string }[] = [
-  { id: "REQUEST_CORRECTION", label: "Request correction", verb: "Send correction request", icon: MessageSquareWarning, tone: "amber", help: "Vendor gets a message and the case moves to Waiting on vendor." },
-  { id: "APPROVE", label: "Approve", verb: "Approve application", icon: CheckCircle2, tone: "teal", help: "Final. Records a manual approval." },
-  { id: "REJECT", label: "Reject", verb: "Reject application", icon: XCircle, tone: "red", help: "Final. The vendor sees your reason." },
-];
 
 function Issues({ c }: { c: Case }) {
   const all = [...c.issues.failed, ...c.issues.unverified];
@@ -173,158 +170,6 @@ function RunCard({ run, appId, open, onToggle, latest }: { run: RunDetail; appId
   );
 }
 
-function DecisionPanel({ c, onDone }: { c: Case; onDone: (next: Case, message: string) => void }) {
-  const { onUnauthorized } = useAdmin();
-  const [action, setAction] = useState<Action | null>(null);
-  const [reason, setReason] = useState("");
-  const [open, setOpen] = useState(false);
-  const [confirmId, setConfirmId] = useState(false);
-  const [reviewed, setReviewed] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<{ message: string; stale: boolean } | null>(null);
-  const chosen = ACTIONS.find((a) => a.id === action);
-  const reasonOk = reason.trim().length >= 3;
-
-  const save = async () => {
-    if (!action || !c.latest_run_id) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await api.review(c.application_id, {
-        action,
-        reason: reason.trim(),
-        expected_revision: c.revision,
-        expected_latest_run_id: c.latest_run_id,
-      });
-      setOpen(false);
-      onDone(next, `${chosen?.label ?? "Decision"} recorded for ${c.application_id}.`);
-    } catch (e) {
-      if (onUnauthorized(e)) return;
-      setOpen(false);
-      setError({ message: e instanceof Error ? e.message : "Decision not saved.", stale: e instanceof ApiError && e.status === 409 });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Card className="border-navy-200">
-      <CardHeader title="Record a decision" description="Your reason is saved to the audit trail and shown to the vendor." />
-      <div className="grid gap-4 px-5 py-4">
-        <fieldset>
-          <legend className="sr-only">Decision</legend>
-          <div className="grid gap-2">
-            {ACTIONS.map((a) => {
-              const Icon = a.icon;
-              const selected = action === a.id;
-              return (
-                <label
-                  key={a.id}
-                  className={cx(
-                    "flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2.5 transition-colors",
-                    selected
-                      ? a.tone === "teal" ? "border-teal-500 bg-teal-50" : a.tone === "red" ? "border-red-500 bg-red-50" : "border-amber-500 bg-amber-50"
-                      : "border-slate-200 hover:border-slate-300",
-                  )}
-                >
-                  <input type="radio" name="decision" className="sr-only" checked={selected} onChange={() => setAction(a.id)} />
-                  <Icon className={cx("mt-0.5 size-4 shrink-0", a.tone === "teal" ? "text-teal-700" : a.tone === "red" ? "text-red-700" : "text-amber-600")} aria-hidden />
-                  <span>
-                    <span className="block text-sm font-medium text-slate-900">{a.label}</span>
-                    <span className="block text-xs text-slate-500">{a.help}</span>
-                  </span>
-                </label>
-              );
-            })}
-          </div>
-        </fieldset>
-        <div>
-          <label htmlFor="review-reason" className="text-[13px] font-medium text-slate-800">
-            {action === "REQUEST_CORRECTION" ? "What should the vendor change?" : "Reason for the vendor and audit trail"}
-          </label>
-          <Textarea
-            id="review-reason"
-            className="mt-1.5"
-            maxLength={1000}
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            placeholder={action === "REQUEST_CORRECTION" ? "e.g. Upload a bank letter that shows the company's legal name as account holder." : "State the evidence you reviewed."}
-          />
-          <p className="mt-1 text-right text-xs text-slate-400 tabular">{reason.length}/1000</p>
-        </div>
-        {error ? (
-          <Alert tone="error" title="Decision not saved">
-            {error.message}
-            {error.stale ? <div className="mt-2"><Button size="sm" variant="secondary" icon={RefreshCw} onClick={() => window.location.reload()}>Reload case</Button></div> : null}
-          </Alert>
-        ) : null}
-        <Dialog.Root
-          open={open}
-          onOpenChange={(o) => {
-            setOpen(o);
-            if (o) {
-              setConfirmId(false);
-              setReviewed(false);
-            }
-          }}
-        >
-          <Dialog.Trigger asChild>
-            <Button disabled={!action || !reasonOk} variant={action === "REJECT" ? "danger" : action === "APPROVE" ? "success" : "primary"} icon={Gavel}>
-              {chosen ? `${chosen.verb}…` : "Choose a decision"}
-            </Button>
-          </Dialog.Trigger>
-          <Dialog.Portal>
-            <Dialog.Overlay className="fixed inset-0 z-40 bg-slate-900/40" />
-            <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl bg-white shadow-xl focus:outline-none">
-              <div className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
-                <div>
-                  <Dialog.Title className="text-[15px] font-semibold text-slate-900">{chosen?.verb}?</Dialog.Title>
-                  <Dialog.Description className="mt-0.5 text-[13px] text-slate-500">
-                    {action === "REQUEST_CORRECTION" ? "The vendor will see your message and can resubmit." : "This is a final decision and makes the application read-only."}
-                  </Dialog.Description>
-                </div>
-                <Dialog.Close className="rounded-md p-1 text-slate-500 hover:bg-slate-100" aria-label="Close"><X className="size-4" aria-hidden /></Dialog.Close>
-              </div>
-              <div className="grid gap-3 px-5 py-4">
-                <dl className="rounded-lg bg-slate-50 px-3 py-1">
-                  <KeyValue label="Application" value={c.application_id} mono />
-                  <KeyValue label="Business" value={c.business} />
-                  <KeyValue label="Reviewed run" value={c.latest_run_id ?? "—"} mono />
-                </dl>
-                <p className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700">“{reason.trim()}”</p>
-                <label className="flex items-start gap-2.5 text-sm text-slate-700">
-                  <input type="checkbox" className="mt-0.5 size-4 accent-navy-900" checked={confirmId} onChange={(e) => setConfirmId(e.target.checked)} />
-                  This decision applies to <span className="font-mono">{c.application_id}</span>.
-                </label>
-                {action === "APPROVE" ? (
-                  <label className="flex items-start gap-2.5 text-sm text-slate-700">
-                    <input type="checkbox" className="mt-0.5 size-4 accent-navy-900" checked={reviewed} onChange={(e) => setReviewed(e.target.checked)} />
-                    I reviewed the evidence and understand this is not official GST or bank verification.
-                  </label>
-                ) : null}
-              </div>
-              <div className="flex justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3">
-                <Dialog.Close asChild><Button variant="secondary">Cancel</Button></Dialog.Close>
-                <Button
-                  variant={action === "REJECT" ? "danger" : action === "APPROVE" ? "success" : "primary"}
-                  loading={busy}
-                  disabled={!confirmId || (action === "APPROVE" && !reviewed)}
-                  onClick={save}
-                >
-                  {chosen?.verb}
-                </Button>
-              </div>
-            </Dialog.Content>
-          </Dialog.Portal>
-        </Dialog.Root>
-        <p className="text-xs text-slate-500">
-          Saved against revision {c.revision}. If the vendor resubmits meanwhile, the server rejects this decision as stale.
-        </p>
-      </div>
-    </Card>
-  );
-}
-
 /** Staff-only: the existing application this case matches, values side by side. */
 function LinkedRecordCard({ record }: { record: LinkedRecord }) {
   return (
@@ -369,15 +214,53 @@ function LinkedRecordCard({ record }: { record: LinkedRecord }) {
   );
 }
 
+const CASE_SHORTCUTS: [string, string][] = [
+  ["A", "Approve"], ["C", "Request correction"], ["R", "Reject"], ["?", "Show this list"], ["Esc", "Close a dialog"],
+];
+
+function ShortcutHelp({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-slate-900/40" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-slate-200 bg-white p-5 shadow-xl focus:outline-none">
+          <div className="flex items-start justify-between">
+            <Dialog.Title className="text-base font-semibold text-slate-900">Keyboard shortcuts</Dialog.Title>
+            <Dialog.Close className="rounded-md p-1 text-slate-500 hover:bg-slate-100" aria-label="Close"><X className="size-4" aria-hidden /></Dialog.Close>
+          </div>
+          <Dialog.Description className="mt-1 text-[13px] text-slate-500">Shortcuts are off while you type in a field.</Dialog.Description>
+          <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+            {CASE_SHORTCUTS.map(([key, label]) => (
+              <div key={key} className="contents">
+                <dt><kbd className="rounded-md border border-slate-300 bg-slate-50 px-1.5 py-0.5 font-mono text-xs">{key}</kbd></dt>
+                <dd className="text-slate-700">{label}</dd>
+              </div>
+            ))}
+          </dl>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 export function AdminCase() {
   const { id = "" } = useParams();
-  const { onUnauthorized } = useAdmin();
+  const [params] = useSearchParams();
+  const navigate = useNavigate();
+  const { onUnauthorized, toast } = useAdmin();
+  const requested = params.get("tab") as Tab | null;
+  const tab: Tab = requested && TAB_IDS.includes(requested) ? requested : "NEEDS_REVIEW";
   const [c, setC] = useState<Case | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [openRun, setOpenRun] = useState<string | null>(null);
+  const [action, setAction] = useState<Decision | null>(null);
+  const [help, setHelp] = useState(false);
+  const { data: overview } = useOverview();
 
   const load = useCallback(() => {
+    setC(null);
+    setError(null);
+    setOpenRun(null);
     api
       .adminCase(id)
       .then((data) => {
@@ -390,11 +273,41 @@ export function AdminCase() {
   }, [id, onUnauthorized]);
   useEffect(load, [load]);
 
+  const inTab = useCallback(
+    (rows: { application_id: string; tab: string }[]) => rows.filter((r) => tab === "ALL" || r.tab === tab).map((r) => r.application_id),
+    [tab],
+  );
+  const list = useMemo(() => inTab(overview?.queue ?? []), [overview, inTab]);
+  const index = list.indexOf(id);
+  const prevId = index > 0 ? list[index - 1] : null;
+  const nextId = index >= 0 && index < list.length - 1 ? list[index + 1] : null;
+  const caseUrl = (target: string) => `/admin/cases/${target}${tab === "NEEDS_REVIEW" ? "" : `?tab=${tab}`}`;
+  const queueUrl = `/admin${tab === "NEEDS_REVIEW" ? "" : `?tab=${tab}`}`;
+
+  const open = (decision: Decision) => {
+    if (c?.can_review) setAction(decision);
+  };
+  useShortcuts({ a: () => open("APPROVE"), c: () => open("REQUEST_CORRECTION"), r: () => open("REJECT"), "?": () => setHelp(true) }, !!c);
+
+  const onSaved = async (saved: Case) => {
+    setAction(null);
+    setC(saved);
+    toast("Decision saved · Message added for vendor");
+    // Auto-advance: the next case in the same queue tab, keeping the queue order.
+    try {
+      const fresh = inTab((await api.overview()).queue).filter((other) => other !== id);
+      const target = fresh[Math.min(Math.max(index, 0), fresh.length - 1)];
+      navigate(target ? caseUrl(target) : queueUrl);
+    } catch (e) {
+      onUnauthorized(e);
+    }
+  };
+
   if (error) {
     return (
       <div className="mx-auto max-w-3xl px-4 py-8">
         <Alert tone="error" title="Case unavailable">{error}</Alert>
-        <Link to="/admin" className="mt-4 inline-block text-sm font-medium text-navy-700 hover:underline">← Back to queue</Link>
+        <Link to={queueUrl} className="mt-4 inline-block text-sm font-medium text-navy-700 hover:underline">← Back to applications</Link>
       </div>
     );
   }
@@ -403,9 +316,19 @@ export function AdminCase() {
   const latestRun = c.runs[0];
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6">
-      <Link to="/admin" className="inline-flex items-center gap-1 text-[13px] font-medium text-slate-600 hover:text-navy-800">
-        <ArrowLeft className="size-3.5" aria-hidden /> Review queue
-      </Link>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Link to={queueUrl} className="inline-flex items-center gap-1 text-[13px] font-medium text-slate-600 hover:text-navy-800">
+          <ArrowLeft className="size-3.5" aria-hidden /> Applications
+        </Link>
+        <div className="flex items-center gap-2">
+          {index >= 0 ? <span className="text-[13px] text-slate-500 tabular">{index + 1} of {list.length}</span> : null}
+          <Button size="sm" variant="secondary" icon={ChevronLeft} disabled={!prevId} onClick={() => prevId && navigate(caseUrl(prevId))}>Prev</Button>
+          <Button size="sm" variant="secondary" disabled={!nextId} onClick={() => nextId && navigate(caseUrl(nextId))}>
+            Next <ChevronRight className="size-4" aria-hidden />
+          </Button>
+          <Button size="sm" variant="ghost" icon={Keyboard} onClick={() => setHelp(true)} aria-label="Keyboard shortcuts">?</Button>
+        </div>
+      </div>
       <div className="mt-2 flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h1 className="text-xl font-semibold tracking-tight text-slate-900">{c.business || "Unnamed business"}</h1>
@@ -421,7 +344,6 @@ export function AdminCase() {
         </div>
       </div>
 
-      {notice ? <Alert tone="success" className="mt-4">{notice}</Alert> : null}
 
       <Card className={cx("mt-4 px-5 py-4", c.status === "PENDING" ? "border-amber-200 bg-amber-50/50" : c.status === "APPROVED" ? "border-teal-200 bg-teal-50/50" : "border-red-200 bg-red-50/50")}>
         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -496,15 +418,23 @@ export function AdminCase() {
 
         <aside className="grid gap-5 lg:sticky lg:top-20">
           {c.can_review ? (
-            <DecisionPanel
-              key={`${c.revision}`}
-              c={c}
-              onDone={(next, message) => {
-                setC(next);
-                setNotice(message);
-                window.scrollTo({ top: 0, behavior: "smooth" });
-              }}
-            />
+            <Card>
+              <CardHeader title="Decide" description="Each decision needs a reason. The vendor gets a message on their application page." />
+              <div className="grid gap-2 px-5 py-4">
+                {(["APPROVE", "REQUEST_CORRECTION", "REJECT"] as Decision[]).map((d) => {
+                  const def = DECISIONS[d];
+                  return (
+                    <Button key={d} variant={d === "REQUEST_CORRECTION" ? "secondary" : def.variant} icon={def.icon} className="justify-between" onClick={() => open(d)}>
+                      <span className="flex-1 text-left">{d === "REQUEST_CORRECTION" ? "Request correction" : def.verb}</span>
+                      <kbd className="rounded border border-current/30 px-1.5 font-mono text-[11px] opacity-80">{def.key}</kbd>
+                    </Button>
+                  );
+                })}
+                {c.requires_confirmation ? (
+                  <p className="text-xs text-amber-800">Approving needs a bank-change confirmation (call-back to the contact on the existing record).</p>
+                ) : null}
+              </div>
+            </Card>
           ) : (
             <Card className="px-5 py-4">
               <p className="flex items-center gap-2 text-sm font-semibold text-slate-900">
@@ -517,6 +447,10 @@ export function AdminCase() {
             </Card>
           )}
           <Card>
+            <CardHeader title="Messages to the vendor" description="Shown on the vendor's application page. No email is sent." />
+            <MessageList messages={c.messages} audience="admin" />
+          </Card>
+          <Card>
             <CardHeader title="Reviewer actions" />
             {c.reviews.length ? (
               <ol className="divide-y divide-slate-100">
@@ -527,6 +461,7 @@ export function AdminCase() {
                       <span className="text-xs text-slate-500">{formatDateTime(r.created_at)}</span>
                     </div>
                     <p className="mt-1.5 text-[13px] text-slate-700">“{r.reason}”</p>
+                    {r.confirmation ? <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-teal-800"><CheckCircle2 className="size-3.5" aria-hidden />{r.confirmation}</p> : null}
                     <p className="mt-1 text-xs text-slate-500">{r.actor} · run <span className="font-mono">{r.reviewed_run_id}</span></p>
                   </li>
                 ))}
@@ -545,6 +480,8 @@ export function AdminCase() {
           </Card>
         </aside>
       </div>
+      <DecisionDialog c={c} action={action} onClose={() => setAction(null)} onSaved={onSaved} onUnauthorized={onUnauthorized} />
+      <ShortcutHelp open={help} onOpenChange={setHelp} />
     </div>
   );
 }

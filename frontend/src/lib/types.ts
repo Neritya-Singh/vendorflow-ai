@@ -69,6 +69,15 @@ export interface StageEvent {
   note: string;
 }
 
+export interface VendorMessage {
+  id: string;
+  at: string | null;
+  source: "Automated check" | "Reviewer action";
+  title: string;
+  text: string;
+  delivery: string;
+}
+
 export interface TodoItem {
   key: string;
   text: string;
@@ -104,6 +113,7 @@ export interface VendorView {
   next_step: string;
   reasons: string[];
   todo: TodoItem[];
+  messages: VendorMessage[];
   reviewer_note: ReviewerNote | null;
   stages: StageRow[];
   elapsed_ms: number | null;
@@ -150,6 +160,7 @@ export interface ReviewRecord {
   action: "APPROVE" | "REJECT" | "REQUEST_CORRECTION";
   label: string;
   reason: string;
+  confirmation: string | null;
   actor: string;
   reviewed_run_id: string | null;
   created_at: string | null;
@@ -228,6 +239,10 @@ export interface AdminCase {
   runs: RunDetail[];
   reviews: ReviewRecord[];
   linked_records: LinkedRecord[];
+  messages: VendorMessage[];
+  correction_draft: string;
+  requires_confirmation: boolean;
+  confirmation_text: string;
   can_review: boolean;
   active_correction_request: boolean;
 }

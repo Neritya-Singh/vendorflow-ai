@@ -6,7 +6,7 @@ const base: VendorView = {
   application_id: "VF-0123456789AB", status: "PENDING", status_label: "With our team", decision_source: "AUTOMATED",
   owner: "TEAM", processing_unavailable: true, retry_available: true, heading: "With our team — no action needed",
   next_step: "Our team will look at it.", reasons: ["We couldn't read your documents just now because of a temporary problem on our side."],
-  todo: [], reviewer_note: null, stages: [], elapsed_ms: 10, timeline: [], documents: [], editable: false, needs_resume: false,
+  todo: [], messages: [], reviewer_note: null, stages: [], elapsed_ms: 10, timeline: [], documents: [], editable: false, needs_resume: false,
   latest_run_id: "RUN-0123456789AB", submitted: {}, created_at: null,
 };
 

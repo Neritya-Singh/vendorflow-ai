@@ -356,3 +356,48 @@ def pipeline_options(registry) -> dict:
     """v2 policy hooks for ProcessingPipeline / PersistentVendorService."""
     from .rules import norm_legal_name
     return {"screening": records_screening(registry), "name_key": norm_legal_name}
+
+
+# ---------------------------------------------------------------- B3 decisions
+# V2_02 §7–8: a structured confirmation is required to approve an unresolved
+# duplicate or bank-reuse case. Enforced by the API, not only the UI.
+BANK_CHANGE_CONFIRMATION = "Bank change confirmed by call-back to the contact on the existing record"
+CONFIRMATION_PREFIX = "Confirmation: "
+
+
+def requires_confirmation(run: dict | None) -> bool:
+    return any(c.get("rule_id") in {"R12", "R15"} and c.get("state") != "PASS" for c in _checks(run))
+
+
+_FLAG_REQUESTS = {
+    "R08": "Check that your legal name, GSTIN and state match your GST certificate exactly.",
+    "R09": "Check that your account number matches your bank document.",
+    "R10": "Check that your IFSC matches your bank document.",
+    "R12": "Upload a recent letter from your bank confirming that this account belongs to your business.",
+    "R15": "Upload a recent letter from your bank confirming that this account belongs to your business.",
+    "R14": "Submit your application again so we can read your documents.",
+}
+
+
+def correction_draft(run: dict | None, legal_name: str = "") -> str:
+    """Vendor message pre-drafted from the flagged items; the reviewer edits it.
+    Never names another case or the reason a records check flagged."""
+    asks: list[str] = [i["text"] for i in vendor_items(run)]
+    for flag in team_flags(run):
+        if flag["rule_id"] == "R11":
+            who = legal_name or "your business's legal name"
+            text = f"Upload a bank letter or cancelled cheque that shows {who} as the account holder."
+        else:
+            text = _FLAG_REQUESTS.get(flag["rule_id"], "")
+        if text and text not in asks:
+            asks.append(text)
+    return " ".join(asks)[:1000] or "Please check your details and documents, then submit again."
+
+
+def split_confirmation(reason: str) -> tuple[str, str | None]:
+    """Stored as '<reason>\\n\\nConfirmation: <text>' in review_actions.reason."""
+    marker = "\n\n" + CONFIRMATION_PREFIX
+    if marker in (reason or ""):
+        head, tail = reason.split(marker, 1)
+        return head, tail
+    return reason, None

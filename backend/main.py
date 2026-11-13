@@ -59,6 +59,7 @@ class Login(BaseModel):
 class Review(BaseModel):
     action: Literal["APPROVE", "REJECT", "REQUEST_CORRECTION"]
     reason: str = Field(min_length=3, max_length=1000)
+    confirmation: str | None = Field(default=None, max_length=200)
     expected_revision: int
     expected_latest_run_id: str
 
@@ -417,7 +418,7 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             raise
         except Exception as exc:
             raise fail(exc) from None
-        return presenters.admin_case(app_row, runs, reviews, linked)
+        return presenters.admin_case(app_row, runs, reviews, linked, buyer=settings.workspace_name)
 
     @app.get("/api/admin/applications/{application_id}/reveal")
     def admin_reveal(application_id: str, _session: dict = Depends(require_admin)):
@@ -456,8 +457,17 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         reason = body.reason.strip()
         if len(reason) < 3:
             raise HTTPException(400, "A specific written rationale is required.")
+        if v2.CONFIRMATION_PREFIX.strip() in reason:
+            raise HTTPException(400, "Use the confirmation option instead of typing it into the reason.")
         try:
             repo, app_row, runs, reviews = load_case(application_id)
+            if body.action == "APPROVE" and v2.requires_confirmation(runs[0] if runs else None):
+                # Server-side guard (V2_02 §7): an unresolved duplicate / bank-reuse case
+                # cannot be approved without the structured call-back confirmation.
+                if (body.confirmation or "").strip() != v2.BANK_CHANGE_CONFIRMATION:
+                    raise HTTPException(400, "Approving this case needs the bank-change confirmation: "
+                                             + v2.BANK_CHANGE_CONFIRMATION + ".")
+                reason = f"{reason}\n\n{v2.CONFIRMATION_PREFIX}{v2.BANK_CHANGE_CONFIRMATION}"
             if body.action == "REQUEST_CORRECTION" and reviews:
                 latest = reviews[0]
                 from vendorflow.ux_support import active_review_request
@@ -478,7 +488,7 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             raise HTTPException(409, str(exc)) from None
         except Exception as exc:
             raise fail(exc) from None
-        return presenters.admin_case(app_row, runs, reviews, linked)
+        return presenters.admin_case(app_row, runs, reviews, linked, buyer=settings.workspace_name)
 
     @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     def api_not_found(path: str):

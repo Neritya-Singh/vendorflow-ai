@@ -133,3 +133,22 @@ def test_legal_suffix_normaliser():
     assert norm_legal_name("Ravi Example") != norm_legal_name("Acme Widgets Private Limited")
     # v1.1 strict comparison is untouched for callers that do not opt in.
     assert norm_name("Acme Widgets Pvt Ltd") != norm_name("Acme Widgets Private Limited")
+
+
+# ---------------------------------------------------------------- B3 decisions
+
+def test_correction_draft_uses_flagged_items_without_naming_other_cases():
+    assert v2.correction_draft(run({"R11": "x"}), "SAMPLE Traders Pvt Ltd") == (
+        "Upload a bank letter or cancelled cheque that shows SAMPLE Traders Pvt Ltd as the account holder.")
+    draft = v2.correction_draft(run({"R12": "x", "R15": "x"}))
+    assert draft == "Upload a recent letter from your bank confirming that this account belongs to your business."
+    assert "VF-" not in draft and "duplicate" not in draft.lower()
+    assert v2.correction_draft(run({"R07": "x"})).startswith("Check your IFSC")
+
+
+def test_confirmation_requirement_and_storage_format():
+    assert v2.requires_confirmation(run({"R12": "x"})) and v2.requires_confirmation(run(unknown=("R12",)))
+    assert not v2.requires_confirmation(run({"R11": "x"}))
+    stored = "Called the contact.\n\nConfirmation: " + v2.BANK_CHANGE_CONFIRMATION
+    assert v2.split_confirmation(stored) == ("Called the contact.", v2.BANK_CHANGE_CONFIRMATION)
+    assert v2.split_confirmation("plain") == ("plain", None)

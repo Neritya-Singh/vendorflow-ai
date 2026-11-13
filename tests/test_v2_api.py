@@ -502,3 +502,85 @@ def test_legal_suffix_variant_of_bank_holder_is_approved(client):
     assert fields["legal_name"] == "Acme Widgets Private Limited"
     _, response = submit(client, {**fields, "bank_holder": "ACME WIDGETS PVT. LTD."}, gst, bank)
     assert result_of(stream_events(response))["status"] == "APPROVED"
+
+
+# ---------------------------------------------------------------- B3 messages + decisions
+
+def review(client, csrf, app_id, action, reason, **extra):
+    case = client.get(f"/api/admin/applications/{app_id}").json()
+    return client.post(f"/api/admin/applications/{app_id}/review", headers={"x-csrf-token": csrf}, json={
+        "action": action, "reason": reason, "expected_revision": case["revision"],
+        "expected_latest_run_id": case["latest_run_id"], **extra})
+
+
+def test_message_log_one_entry_per_outcome_and_action_honest_delivery(client):
+    fields, gst, bank = fixture("ec2_bank_owner")
+    creds, response = submit(client, fields, gst, bank)
+    first = result_of(stream_events(response))
+    assert [m["title"] for m in first["messages"]] == ["With our team"]
+    assert first["messages"][0]["text"].startswith("Thanks, your application is with our team")
+    csrf = admin(client)
+    case = client.get(f"/api/admin/applications/{creds['application_id']}").json()
+    assert case["correction_draft"] == ("Upload a bank letter or cancelled cheque that shows "
+                                        "Acme Widgets Private Limited as the account holder.")
+    assert review(client, csrf, creds["application_id"], "REQUEST_CORRECTION", case["correction_draft"]).status_code == 200
+    tracked = client.post("/api/vendor/track", json=creds).json()
+    titles = [m["title"] for m in tracked["messages"]]
+    assert titles == ["Our team asked for a change", "With our team"]
+    assert tracked["messages"][0]["text"].startswith("Our team needs one change: Upload a bank letter")
+    for m in tracked["messages"]:
+        assert m["delivery"] == "Message added to the vendor's application page (no email sent)"
+        assert "email sent" not in m["text"].lower()
+    vendor_safe(tracked)
+    admin_case = client.get(f"/api/admin/applications/{creds['application_id']}").json()
+    assert [m["title"] for m in admin_case["messages"]] == titles
+
+
+def test_vendor_items_produce_waiting_on_you_message(client):
+    fields, gst, bank = fixture("happy")
+    _, response = submit(client, fields, bank, gst)
+    result = result_of(stream_events(response))
+    assert result["messages"][0]["title"] == "Action needed from you"
+    assert "Your files look swapped" in result["messages"][0]["text"]
+
+
+def test_approving_bank_reuse_case_requires_server_side_confirmation(client):
+    approve_first(client)
+    happy = fixture("happy")[0]
+    fields, gst, _ = fixture("frontend_happy")
+    _, _, happy_bank = fixture("happy")
+    fields = {**fields, "account_number": happy["account_number"], "ifsc": happy["ifsc"],
+              "bank_holder": fields["legal_name"]}
+    creds, response = submit(client, fields, gst, happy_bank)
+    stream_events(response)
+    csrf = admin(client)
+    app_id = creds["application_id"]
+    case = client.get(f"/api/admin/applications/{app_id}").json()
+    assert case["requires_confirmation"] is True
+    missing = review(client, csrf, app_id, "APPROVE", "Checked with the bank.")
+    assert missing.status_code == 400 and "bank-change confirmation" in missing.json()["detail"]
+    wrong = review(client, csrf, app_id, "APPROVE", "Checked with the bank.", confirmation="yes")
+    assert wrong.status_code == 400
+    typed = review(client, csrf, app_id, "APPROVE", "Confirmation: trust me")
+    assert typed.status_code == 400
+    ok = review(client, csrf, app_id, "APPROVE", "Shared group treasury account; confirmed by phone.",
+                confirmation="Bank change confirmed by call-back to the contact on the existing record")
+    assert ok.status_code == 200, ok.text
+    saved = ok.json()["reviews"][0]
+    assert saved["reason"] == "Shared group treasury account; confirmed by phone."
+    assert saved["confirmation"] == "Bank change confirmed by call-back to the contact on the existing record"
+    tracked = client.post("/api/vendor/track", json=creds).json()
+    assert tracked["status"] == "APPROVED" and tracked["reviewer_note"] is None  # approval reason is internal
+    assert "treasury" not in json.dumps(tracked) and "call-back" not in json.dumps(tracked)
+
+
+def test_plain_case_approval_needs_no_confirmation_and_reject_reason_reaches_vendor(client):
+    fields, gst, bank = fixture("ec2_bank_owner")
+    creds, response = submit(client, fields, gst, bank)
+    stream_events(response)
+    csrf = admin(client)
+    assert client.get(f"/api/admin/applications/{creds['application_id']}").json()["requires_confirmation"] is False
+    assert review(client, csrf, creds["application_id"], "REJECT", "Bank account not owned by the business").status_code == 200
+    tracked = client.post("/api/vendor/track", json=creds).json()
+    assert tracked["messages"][0]["text"] == ("We couldn't approve your application: Bank account not owned by the "
+                                              "business. Questions: contact Zamp AI's finance team.")

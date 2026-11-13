@@ -1,4 +1,4 @@
-import { ExternalLink, Lock, LogOut, ShieldCheck } from "lucide-react";
+import { CheckCircle2, ExternalLink, Lock, LogOut, ShieldCheck } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 import { Link, NavLink, Outlet } from "react-router-dom";
 import { OfflineBanner } from "../../components/AppShell";
@@ -8,6 +8,8 @@ import { ApiError, api, setCsrf } from "../../lib/api";
 interface AdminCtx {
   signOut: () => Promise<void>;
   onUnauthorized: (e: unknown) => boolean;
+  /** Short confirmation that survives navigation to the next case. */
+  toast: (text: string) => void;
 }
 const Ctx = createContext<AdminCtx | null>(null);
 export const useAdmin = () => {
@@ -128,6 +130,14 @@ export function AdminLayout() {
     return false;
   }, []);
 
+  const [toastText, setToastText] = useState<string | null>(null);
+  const toast = useCallback((text: string) => setToastText(text), []);
+  useEffect(() => {
+    if (!toastText) return;
+    const timer = window.setTimeout(() => setToastText(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [toastText]);
+
   if (status === "loading") return <div className="grid min-h-dvh place-items-center"><Spinner label="Checking session…" /></div>;
   if (status === "out")
     return (
@@ -138,7 +148,7 @@ export function AdminLayout() {
     );
 
   return (
-    <Ctx.Provider value={{ signOut, onUnauthorized }}>
+    <Ctx.Provider value={{ signOut, onUnauthorized, toast }}>
       <div className="flex min-h-dvh flex-col bg-slate-50">
         <OfflineBanner />
         <header className="sticky top-0 z-20 bg-navy-900 text-white">
@@ -170,6 +180,13 @@ export function AdminLayout() {
         <main id="main" className="flex-1">
           <Outlet />
         </main>
+        <div aria-live="polite" role="status" className="pointer-events-none fixed inset-x-0 bottom-24 z-50 flex justify-center px-4">
+          {toastText ? (
+            <p className="flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white shadow-lg">
+              <CheckCircle2 className="size-4 text-teal-300" aria-hidden /> {toastText}
+            </p>
+          ) : null}
+        </div>
       </div>
     </Ctx.Provider>
   );

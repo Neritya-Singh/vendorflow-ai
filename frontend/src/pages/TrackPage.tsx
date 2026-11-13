@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { PageHeader } from "../components/AppShell";
 import { FilePicker } from "../components/FilePicker";
 import { DecisionCard, SavedStages, ScopeNote, VendorStatusPill, VendorTimeline } from "../components/Outcome";
+import { MessageLog } from "../components/MessageLog";
 import { ProcessingPanel } from "../components/ProcessingPanel";
 import { BankSection, BusinessSection, type FieldErrors } from "../components/VendorFormSections";
 import { Alert, Button, Card, CardHeader, Field, Input, Spinner } from "../components/ui";
@@ -272,6 +273,7 @@ export function TrackPage() {
             {view.stages.some((s) => s.state !== "NOT_RUN") ? <SavedStages view={view} /> : null}
           </div>
           <div className="grid gap-5">
+            {view.messages.length ? <MessageLog messages={view.messages} /> : null}
             {view.timeline.length ? <VendorTimeline items={view.timeline} /> : null}
             {view.documents.length ? (
               <Card>
