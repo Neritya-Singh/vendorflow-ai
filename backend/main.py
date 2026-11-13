@@ -113,9 +113,12 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         if request.url.path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
         else:
+            # img-src blob: lets the reviewer's document viewer show the page images it
+            # fetched with the session cookie (it keeps them as blob: URLs for the session).
+            # Only this page's own scripts can create blob: URLs.
             response.headers.setdefault(
                 "Content-Security-Policy",
-                "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+                "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
                 "font-src 'self' data:; object-src 'none'; frame-src 'self'; frame-ancestors 'none'; "
                 "base-uri 'self'; form-action 'self'")
         return response

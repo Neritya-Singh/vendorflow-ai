@@ -89,3 +89,38 @@ def test_health_needs_no_secrets(tmp_path):
 @pytest.mark.parametrize("line", ["--no-proxy-headers", "${PORT:-8000}", "tesseract-ocr", "npm run build"])
 def test_dockerfile_contract(line):
     assert line in (ROOT / "Dockerfile").read_text()
+
+
+def test_page_csp_lets_the_document_viewer_show_its_blob_images(monkeypatch, tmp_path):
+    """The viewer fetches each page with the reviewer's cookie and shows it as a blob: URL.
+    A CSP without blob: in img-src made every preview blank on Render (and locally)."""
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>t</title>")
+    client = app_client(monkeypatch, trust_proxy=True, frontend_dist=dist)
+    for path in ("/admin/cases/VF-000000000000", "/"):
+        csp = client.get(path).headers["content-security-policy"]
+        directives = {d.split()[0]: d.split()[1:] for d in csp.split(";") if d.strip()}
+        assert "blob:" in directives["img-src"] and "'self'" in directives["img-src"], csp
+        # nothing else is loosened
+        assert directives["default-src"] == ["'self'"] and directives["object-src"] == ["'none'"]
+        assert "script-src" not in directives and "blob:" not in directives["default-src"]
+
+
+def test_preview_page_is_a_png_for_a_signed_in_reviewer(monkeypatch):
+    from tests.test_v2_intake import CONTACT, creds, submit, upload
+    from tests.test_v2_api import fixture
+    client = app_client(monkeypatch, trust_proxy=True)
+    c = creds(client)
+    _f, gst, bank = fixture("happy")
+    upload(client, c, "GST", gst)
+    upload(client, c, "BANK", bank)
+    client.put("/api/vendor/draft/values", json={**c, "contact": CONTACT})
+    submit(client, c)
+    assert client.post("/api/admin/session", json={"password": ADMIN_PASSWORD}).status_code == 200
+    run = client.get(f"/api/admin/applications/{c['application_id']}").json()["latest_run_id"]
+    base = f"/api/admin/applications/{c['application_id']}/runs/{run}/documents"
+    for doc in ("GST", "BANK"):
+        page = client.get(f"{base}/{doc}/pages/1")
+        assert page.status_code == 200 and page.headers["content-type"] == "image/png"
+        assert page.content.startswith(b"\x89PNG")
