@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vendor step 1 — Upload documents</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+body{margin:0;font-family:Inter,system-ui,sans-serif;color:#0F172A;background:#F3F4F7}
+a{color:#3442C4}a:hover{color:#26318F}
+</style>
+</helmet>
+<div style="height: 100vh; min-height: 760px; box-sizing: border-box; padding: 16px; display: flex; flex-direction: column; gap: 16px; background: #F3F4F7; font-family: Inter, system-ui, sans-serif; overflow: hidden">
+
+  <header style="display: flex; align-items: center; justify-content: space-between; gap: 24px; background: #FFFFFF; border: 1px solid #E4E7EC; border-radius: 16px; padding: 14px 24px; flex-wrap: wrap">
+    <div style="display: flex; align-items: center; gap: 12px">
+      <div aria-hidden="true" style="width: 36px; height: 36px; border-radius: 10px; background: #0F172A; color: #FFFFFF; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px">Z</div>
+      <div style="display: flex; flex-direction: column">
+        <span style="font-weight: 600; font-size: 15px">Zamp AI</span>
+        <span style="font-size: 12px; color: #5B6474">Supplier registration · Demo workspace</span>
+      </div>
+    </div>
+    <ol aria-label="Progress" style="display: flex; align-items: center; gap: 10px; list-style: none; margin: 0; padding: 0; font-size: 14px">
+      <li aria-current="step" style="display: flex; align-items: center; gap: 8px; background: #EEF0FF; color: #26318F; padding: 6px 14px; border-radius: 999px; font-weight: 600"><span style="width: 22px; height: 22px; border-radius: 999px; background: #3442C4; color: #FFFFFF; display: flex; align-items: center; justify-content: center; font-size: 12px">1</span>Documents</li>
+      <li aria-hidden="true" style="width: 28px; height: 2px; background: #D0D5DD"></li>
+      <li style="display: flex; align-items: center; gap: 8px; color: #5B6474; padding: 6px 10px"><span style="width: 22px; height: 22px; border-radius: 999px; border: 1.5px solid #98A2B3; display: flex; align-items: center; justify-content: center; font-size: 12px">2</span>Details</li>
+      <li aria-hidden="true" style="width: 28px; height: 2px; background: #D0D5DD"></li>
+      <li style="display: flex; align-items: center; gap: 8px; color: #5B6474; padding: 6px 10px"><span style="width: 22px; height: 22px; border-radius: 999px; border: 1.5px solid #98A2B3; display: flex; align-items: center; justify-content: center; font-size: 12px">3</span>Submit</li>
+    </ol>
+    <span style="font-size: 12px; color: #5B6474">Powered by VendorFlow</span>
+  </header>
+
+  <main style="flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 16px">
+
+    <section aria-labelledby="docs-h" style="background: #FFFFFF; border: 1px solid #E4E7EC; border-radius: 20px; padding: 28px 32px; display: flex; flex-direction: column; gap: 18px; min-height: 0">
+      <div style="display: flex; flex-direction: column; gap: 6px">
+        <h1 id="docs-h" style="margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -0.01em">Upload your documents</h1>
+        <p style="margin: 0; font-size: 15px; color: #5B6474">We read the details for you, so you won't need to type them. PDF, JPG or PNG, up to 5 MB. Phone photos are fine.</p>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0">
+
+        <div style="display: flex; align-items: center; gap: 16px; border: 1px solid #ABEFC6; background: #F6FEF9; border-radius: 16px; padding: 16px 20px">
+          <div aria-hidden="true" style="width: 40px; height: 40px; border-radius: 12px; background: #DCFAE6; display: flex; align-items: center; justify-content: center">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#15803D" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+          </div>
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 2px">
+            <span style="font-weight: 600; font-size: 15px">GST registration certificate</span>
+            <span style="font-size: 13px; color: #344054">gst-certificate.pdf · Read: GSTIN, legal name, state, address</span>
+          </div>
+          <button type="button" style="font: inherit; font-size: 14px; color: #344054; background: #FFFFFF; border: 1px solid #D0D5DD; border-radius: 10px; padding: 8px 14px; cursor: pointer">Replace</button>
+        </div>
+
+        <div style="display: flex; align-items: center; gap: 16px; border: 1px solid #C7D2FE; background: #F5F7FF; border-radius: 16px; padding: 16px 20px">
+          <div aria-hidden="true" style="width: 40px; height: 40px; border-radius: 12px; background: #E0E7FF; display: flex; align-items: center; justify-content: center">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#3442C4" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.2-8.56"/></svg>
+          </div>
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 6px">
+            <span style="font-weight: 600; font-size: 15px">Cancelled cheque or bank letter</span>
+            <span style="font-size: 13px; color: #344054">cheque-photo.jpg · Reading account holder, account number, IFSC…</span>
+            <div aria-hidden="true" style="height: 6px; border-radius: 999px; background: #E0E7FF; overflow: hidden"><div style="width: 62%; height: 6px; background: #3442C4; border-radius: 999px"></div></div>
+          </div>
+        </div>
+
+        <fieldset style="border: 1px solid #E4E7EC; border-radius: 16px; padding: 16px 20px; margin: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap">
+          <legend style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">MSME registration</legend>
+          <div style="display: flex; flex-direction: column; gap: 2px">
+            <span style="font-weight: 600; font-size: 15px">Is your business registered under Udyam (MSME)?</span>
+            <span style="font-size: 13px; color: #5B6474">Registered micro and small businesses get payment within 45 days.</span>
+          </div>
+          <div style="display: flex; gap: 8px">
+            <label style="display: flex; align-items: center; gap: 8px; border: 2px solid #3442C4; background: #EEF0FF; border-radius: 12px; padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer"><input type="radio" name="msme" checked style="accent-color: #3442C4; margin: 0">Yes</label>
+            <label style="display: flex; align-items: center; gap: 8px; border: 1px solid #D0D5DD; border-radius: 12px; padding: 10px 18px; font-size: 14px; cursor: pointer"><input type="radio" name="msme" style="accent-color: #3442C4; margin: 0">No</label>
+          </div>
+        </fieldset>
+
+        <label style="flex: 1; min-height: 96px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 2px dashed #B4BCF0; border-radius: 16px; background: #FAFBFF; cursor: pointer; padding: 16px">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#3442C4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m6 10 6-6 6 6"/><path d="M4 20h16"/></svg>
+          <span style="font-weight: 600; font-size: 15px">Udyam registration certificate</span>
+          <span style="font-size: 13px; color: #5B6474">Drop the file here or <span style="color: #3442C4; font-weight: 600; text-decoration: underline">browse</span></span>
+          <input type="file" style="position: absolute; width: 1px; height: 1px; opacity: 0">
+        </label>
+      </div>
+
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid #EAECF0; padding-top: 16px">
+        <span style="font-size: 13px; color: #5B6474">Your progress is saved automatically. Use your invite link to come back.</span>
+        <button type="button" style="font: inherit; font-size: 15px; font-weight: 600; color: #FFFFFF; background: #3442C4; border: 0; border-radius: 12px; padding: 12px 28px; cursor: pointer">Continue</button>
+      </div>
+    </section>
+
+    <aside style="display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 16px; min-height: 0">
+      <section aria-labelledby="need-h" style="background: #FFFFFF; border: 1px solid #E4E7EC; border-radius: 20px; padding: 22px 24px; display: flex; flex-direction: column; gap: 12px">
+        <h2 id="need-h" style="margin: 0; font-size: 16px; font-weight: 600">What you need</h2>
+        <ul style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; font-size: 14px">
+          <li style="display: flex; gap: 10px; align-items: center"><span style="width: 8px; height: 8px; border-radius: 999px; background: #15803D" aria-hidden="true"></span>GST registration certificate</li>
+          <li style="display: flex; gap: 10px; align-items: center"><span style="width: 8px; height: 8px; border-radius: 999px; background: #3442C4" aria-hidden="true"></span>Cancelled cheque or bank letter</li>
+          <li style="display: flex; gap: 10px; align-items: center"><span style="width: 8px; height: 8px; border-radius: 999px; background: #98A2B3" aria-hidden="true"></span>Udyam certificate (only if MSME)</li>
+        </ul>
+        <span style="font-size: 13px; color: #5B6474">Takes about 5 minutes.</span>
+      </section>
+
+      <section aria-labelledby="next-h" style="background: #FFFFFF; border: 1px solid #E4E7EC; border-radius: 20px; padding: 22px 24px; display: flex; flex-direction: column; gap: 14px; min-height: 0">
+        <h2 id="next-h" style="margin: 0; font-size: 16px; font-weight: 600">What happens next</h2>
+        <ol style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 14px; font-size: 14px; color: #344054">
+          <li style="display: flex; gap: 12px"><span style="flex: none; width: 24px; height: 24px; border-radius: 8px; background: #F2F4F7; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600">1</span>You check the details we read from your documents.</li>
+          <li style="display: flex; gap: 12px"><span style="flex: none; width: 24px; height: 24px; border-radius: 8px; background: #F2F4F7; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600">2</span>We check your application automatically.</li>
+          <li style="display: flex; gap: 12px"><span style="flex: none; width: 24px; height: 24px; border-radius: 8px; background: #F2F4F7; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600">3</span>You see the result right away, and exactly what to fix if anything is needed.</li>
+        </ol>
+      </section>
+
+      <section style="background: #0F172A; color: #E4E7EC; border-radius: 20px; padding: 18px 24px; display: flex; gap: 12px; align-items: flex-start">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#C7D2FE" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; margin-top: 2px"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+        <span style="font-size: 13px; line-height: 1.5">Your documents are stored privately and seen only by Zamp AI's finance team.</span>
+      </section>
+    </aside>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>
