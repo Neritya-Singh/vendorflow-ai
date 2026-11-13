@@ -5,13 +5,14 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from time import perf_counter
 from uuid import uuid4
-from .models import VendorSubmission, WorkflowResult, StageEvent, Status, ExtractedDocuments
+from .models import CheckResult, VendorSubmission, WorkflowResult, StageEvent, Status, ExtractedDocuments
 from .pdf_reader import PDFInput, read_pdf, ReadPDF, UploadError, likely_swapped_pdf_roles
 from .gemini_extractor import Extractor, ExtractionFailure
 from .rules import checks_without_duplicate, duplicate_check, make_decision, normalize_submission
 
 StageCallback = Callable[[StageEvent], None]
 Lookup = Callable[[str, str], list[str]]
+Screening = Callable[[VendorSubmission, str], list[CheckResult]]
 
 
 class MinimumIntakeError(ValueError):
@@ -19,9 +20,14 @@ class MinimumIntakeError(ValueError):
 
 
 class ProcessingPipeline:
-    def __init__(self, extractor: Extractor, approved_lookup: Lookup | None = None):
+    def __init__(self, extractor: Extractor, approved_lookup: Lookup | None = None, *,
+                 screening: Screening | None = None, name_key: Callable[[str | None], str] | None = None):
+        """`screening` and `name_key` are optional v2 policy hooks. When omitted the
+        v1.1 behaviour (approved-only duplicate check, strict name compare) is unchanged."""
         self.extractor = extractor
         self.approved_lookup = approved_lookup
+        self.screening = screening
+        self.name_key = name_key
 
     def evaluate(self, vendor: VendorSubmission, gst_upload: PDFInput | None, bank_upload: PDFInput | None,
                  *, application_id: str | None = None, trigger: str = "submission",
@@ -99,18 +105,27 @@ class ProcessingPipeline:
 
         emit("S5", "Apply deterministic rules", "STARTED")
         checks = checks_without_duplicate(normalized, extracted, gst_pdf, bank_pdf, extraction_error,
-                                          swapped_documents=swapped_documents)
+                                          swapped_documents=swapped_documents,
+                                          **({"name_key": self.name_key} if self.name_key else {}))
         failed_count = sum(c.state.value != "PASS" for c in checks)
         emit("S5", "Apply deterministic rules", "COMPLETED", f"{failed_count} checks require attention")
 
-        emit("S6", "Check approved-vendor duplicates", "STARTED")
-        duplicate = duplicate_check(normalized, self.approved_lookup, application_id)
-        checks.append(duplicate)
-        lookup_event = "FAILED" if (duplicate.state.value == "UNKNOWN" and self.approved_lookup is not None) else "COMPLETED"
-        if self.approved_lookup is None:
-            lookup_event = "SKIPPED"
-        emit("S6", "Screen registration identity", lookup_event,
-             "Identity screening step completed" if duplicate.state.value != "UNKNOWN" else "Identity screening requires review")
+        if self.screening is not None:
+            emit("S6", "Check our records", "STARTED")
+            screened = self.screening(normalized, application_id)
+            checks.extend(screened)
+            unknown = any(c.state.value == "UNKNOWN" for c in screened)
+            emit("S6", "Check our records", "FAILED" if unknown else "COMPLETED",
+                 "Records check needs review" if unknown else "Records checked")
+        else:
+            emit("S6", "Check approved-vendor duplicates", "STARTED")
+            duplicate = duplicate_check(normalized, self.approved_lookup, application_id)
+            checks.append(duplicate)
+            lookup_event = "FAILED" if (duplicate.state.value == "UNKNOWN" and self.approved_lookup is not None) else "COMPLETED"
+            if self.approved_lookup is None:
+                lookup_event = "SKIPPED"
+            emit("S6", "Screen registration identity", lookup_event,
+                 "Identity screening step completed" if duplicate.state.value != "UNKNOWN" else "Identity screening requires review")
 
         emit("S7", "Route policy decision", "STARTED")
         outcome, reasons, all_reasons, next_action = make_decision(checks)

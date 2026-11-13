@@ -1,8 +1,9 @@
-"""Factory for the UNMODIFIED v1.1 services (or the explicit offline doubles)."""
+"""Factory for the v1.1 services with the v2 policy hooks (or the explicit offline doubles)."""
 from __future__ import annotations
 
 import threading
 
+from vendorflow import v2_policy as v2
 from vendorflow.gemini_extractor import GeminiExtractor
 from vendorflow.persistence import PersistentVendorService, SupabaseRepository
 
@@ -33,4 +34,7 @@ class ServiceProvider:
         return GeminiExtractor()
 
     def service(self) -> PersistentVendorService:
-        return PersistentVendorService(self.repo(), self.extractor())
+        repo = self.repo()
+        # v2 policy hooks: records screening across all statuses + bank reuse, and
+        # legal-suffix name equivalence for the GST name vs bank holder check.
+        return PersistentVendorService(repo, self.extractor(), pipeline_options=v2.pipeline_options(repo))

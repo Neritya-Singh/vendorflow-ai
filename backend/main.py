@@ -397,16 +397,27 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         app_row.pop("tracking_token_hash", None)
         return repo, app_row, repo.runs_for_application(application_id), repo.review_history(application_id)
 
+    def linked_rows(repo, runs: list[dict]) -> list[dict]:
+        """Applications named by the latest run's R12/R15 evidence (staff only)."""
+        found = []
+        for case_id in v2.linked_case_ids(runs[0] if runs else None)[:5]:
+            rows = (repo.client.table("applications").select("id,current_status,payload_json,latest_run_id")
+                    .eq("id", case_id).limit(1).execute().data)
+            if rows and rows[0].get("latest_run_id"):
+                found.append(rows[0])
+        return found
+
     @app.get("/api/admin/applications/{application_id}")
     def admin_case(application_id: str, _session: dict = Depends(require_admin)):
         valid_app_id(application_id)
         try:
-            _repo, app_row, runs, reviews = load_case(application_id)
+            repo, app_row, runs, reviews = load_case(application_id)
+            linked = linked_rows(repo, runs)
         except HTTPException:
             raise
         except Exception as exc:
             raise fail(exc) from None
-        return presenters.admin_case(app_row, runs, reviews)
+        return presenters.admin_case(app_row, runs, reviews, linked)
 
     @app.get("/api/admin/applications/{application_id}/reveal")
     def admin_reveal(application_id: str, _session: dict = Depends(require_admin)):
@@ -457,6 +468,7 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
                               expected_revision=body.expected_revision,
                               expected_latest_run_id=body.expected_latest_run_id)
             _repo, app_row, runs, reviews = load_case(application_id)
+            linked = linked_rows(repo, runs)
         except HTTPException:
             raise
         except ValueError as exc:
@@ -466,7 +478,7 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             raise HTTPException(409, str(exc)) from None
         except Exception as exc:
             raise fail(exc) from None
-        return presenters.admin_case(app_row, runs, reviews)
+        return presenters.admin_case(app_row, runs, reviews, linked)
 
     @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
     def api_not_found(path: str):

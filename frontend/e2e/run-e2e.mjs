@@ -163,6 +163,26 @@ try {
   }, [B.id, B.code]);
   check("H server refuses resubmission of a final application", resubmitStatus === 409, `${resubmitStatus}`);
 
+  // ------------------------------------------------------------ I. payment diversion (EC3)
+  // B is now approved; the same GSTIN arrives with a different bank account.
+  const ec3 = fixture("ec3_duplicate_changed_bank");
+  const I = await apply(page, BASE, ec3, pdf("ec3_duplicate_changed_bank", "gst"), pdf("ec3_duplicate_changed_bank", "bank"), "ec3");
+  const iText = await page.locator("main").textContent();
+  check("I same GSTIN + new bank → Pending, with our team", I.decision === "PENDING/TEAM", I.decision);
+  check("I vendor sees only the neutral 'additional check' line", iText.includes("Our team is completing an additional check")
+    && !iText.includes(B.id) && !/fraud|duplicate|suspicious/i.test(iText));
+  await ap.goto(`${BASE}/admin`);
+  const iRow = await ap.locator("tbody tr").first().textContent();
+  check("I queue puts the high-risk case first with its reason", iRow.includes(I.id)
+    && iRow.includes("Same GSTIN as an approved vendor, different bank account") && iRow.includes("High"), iRow);
+  await ap.locator("tbody tr").first().click();
+  await ap.getByText("Linked record").waitFor();
+  const linked = await ap.locator("section", { hasText: "Linked record" }).first().textContent();
+  check("I case links the approved record and flags the differing account", linked.includes(`Open ${B.id}`)
+    && /Account no\.[^A-Za-z]*Differs/.test(linked), linked.slice(0, 160));
+  check("I linked comparison keeps account numbers masked", !linked.includes(ec3.account_number) && !linked.includes(ec2.account_number));
+  await shot(ap, "09b-admin-linked-record");
+
   // ------------------------------------------------------------ C. swapped PDFs
   const acme = fixture("happy");
   const C = await apply(page, BASE, acme, pdf("happy", "bank"), pdf("happy", "gst"), "swapped");
@@ -211,6 +231,8 @@ try {
   await ap.goto(`${BASE}/admin`);
   await ap.getByRole("heading", { name: "Applications" }).waitFor();
   await ap.getByRole("tab", { name: /Waiting on vendor/ }).click();
+  await ap.locator('[role="tab"][aria-selected="true"]', { hasText: "Waiting on vendor" }).waitFor();
+  await ap.locator("tbody tr", { hasText: C.id }).waitFor({ timeout: 5_000 }).catch(() => {});
   const waiting = await ap.locator("tbody").textContent();
   check("'Waiting on vendor' tab lists the swapped-files case", waiting.includes(C.id) && waiting.includes("files look swapped"), waiting.slice(0, 200));
   const pdfStatus = await ap.evaluate(async (id) => {

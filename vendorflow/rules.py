@@ -36,6 +36,21 @@ def norm_name(value: str | None) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9 ]", " ", (value or "").upper())).strip()
 
 
+# v2 (V2_01 §6, approved): legal-suffix equivalence for the GST legal name vs bank
+# holder comparison only. Abbreviations are expanded on BOTH sides, so
+# "Pvt Ltd" == "Private Limited"; a missing suffix is still a mismatch.
+_LEGAL_TOKENS = {"PVT": "PRIVATE", "PRIV": "PRIVATE", "LTD": "LIMITED", "CO": "COMPANY",
+                 "CORP": "CORPORATION", "INC": "INCORPORATED"}
+
+
+def norm_legal_name(value: str | None) -> str:
+    text = re.sub(r"&", " AND ", (value or "").upper())
+    tokens = norm_name(text).split()
+    if tokens[:2] == ["M", "S"]:  # "M/s Sample Traders"
+        tokens = tokens[2:]
+    return " ".join(_LEGAL_TOKENS.get(token, token) for token in tokens)
+
+
 def norm_state(value: str | None) -> str:
     return re.sub(r"\s+", " ", (value or "").upper().strip())
 
@@ -93,7 +108,8 @@ def add(checks: list[CheckResult], rule: str, ok: bool | None, code: str,
 def checks_without_duplicate(v: VendorSubmission, x: ExtractedDocuments,
                              gst_pdf: ReadPDF | None, bank_pdf: ReadPDF | None,
                              extraction_error: bool, *,
-                             swapped_documents: bool = False) -> list[CheckResult]:
+                             swapped_documents: bool = False,
+                             name_key: Callable[[str | None], str] = norm_name) -> list[CheckResult]:
     checks: list[CheckResult] = []
     missing = [label for label, value in (
         ("Legal business name", v.legal_name), ("Business state", v.business_state),
@@ -173,8 +189,8 @@ def checks_without_duplicate(v: VendorSubmission, x: ExtractedDocuments,
         else "Bank IFSC matches." if ifsc_match else "The IFSC differs from the uploaded bank proof.",
         action="Correct IFSC / replace bank PDF")
     holder_ready = bool(bank_available and x.bank.holder_name and v.bank_holder and v.legal_name)
-    holder_match = (norm_name(x.bank.holder_name) == norm_name(v.bank_holder)
-                    and norm_name(x.bank.holder_name) == norm_name(v.legal_name)) if holder_ready else None
+    holder_match = (name_key(x.bank.holder_name) == name_key(v.bank_holder)
+                    and name_key(x.bank.holder_name) == name_key(v.legal_name)) if holder_ready else None
     add(checks, "R11", holder_match, "BANK_NAME_REVIEW", "Bank account ownership",
         "Bank account ownership cannot be compared until the holder and readable proof are supplied." if holder_match is None
         else "Bank holder matches legal business name." if holder_match else

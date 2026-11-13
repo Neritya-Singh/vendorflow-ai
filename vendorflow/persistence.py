@@ -7,6 +7,7 @@ current application status. No local SQLite or fake 'saved' flags.
 from __future__ import annotations
 
 import hashlib
+import re
 import os
 import secrets
 from dataclasses import dataclass
@@ -139,6 +140,32 @@ class SupabaseRepository:
                     .neq("id", application_id)
                     .execute())
         return [row["id"] for row in response.data]
+
+    # ---- v2 records screening (V2_01 §6). Drafts (zero runs) and the application
+    # itself are excluded; every other status counts.
+    @staticmethod
+    def _v2_record(row: dict) -> dict:
+        payload = row.get("payload_json") or {}
+        return {"id": row.get("id"), "status": row.get("current_status"),
+                "gstin": norm_id(payload.get("gstin")), "legal_name": str(payload.get("legal_name") or ""),
+                "account_number": re.sub(r"\s+", "", str(payload.get("account_number") or "")),
+                "ifsc": norm_id(payload.get("ifsc"))}
+
+    _V2_COLUMNS = "id,current_status,latest_run_id,gstin_normalized,payload_json"
+
+    def records_by_gstin(self, gstin: str, application_id: str) -> list[dict]:
+        rows = (self.client.table("applications").select(self._V2_COLUMNS)
+                .eq("gstin_normalized", norm_id(gstin)).neq("id", application_id).execute().data)
+        return [self._v2_record(r) for r in rows if r.get("latest_run_id") and r.get("id") != application_id]
+
+    def records_by_bank(self, account_number: str, ifsc: str, application_id: str) -> list[dict]:
+        """Prototype scale: filters up to 5,000 submitted applications in process.
+        Production would add an expression index on the normalised account + IFSC."""
+        account = re.sub(r"\s+", "", account_number or "")
+        rows = (self.client.table("applications").select(self._V2_COLUMNS)
+                .neq("id", application_id).limit(5000).execute().data)
+        records = [self._v2_record(r) for r in rows if r.get("latest_run_id") and r.get("id") != application_id]
+        return [r for r in records if r["account_number"] == account and r["ifsc"] == norm_id(ifsc)]
 
     def _latest_document_row(self, application_id: str, doc_type: str) -> dict | None:
         response = (self.client.table("documents")
@@ -399,9 +426,13 @@ class SupabaseRepository:
 
 class PersistentVendorService:
     """Vendor-facing boundaries: track only by ID+secret, never enumerate all apps."""
-    def __init__(self, repo: SupabaseRepository, extractor: Extractor):
+    def __init__(self, repo: SupabaseRepository, extractor: Extractor, *,
+                 pipeline_options: dict | None = None):
+        """`pipeline_options` passes optional v2 hooks (screening, name_key) to
+        ProcessingPipeline; omitted, the v1.1 behaviour is unchanged."""
         self.repo = repo
         self.extractor = extractor
+        self.pipeline_options = dict(pipeline_options or {})
 
     def submit(self, vendor: VendorSubmission, gst_upload: PDFInput | None,
                bank_upload: PDFInput | None, stage_callback: StageCallback | None = None,
@@ -421,7 +452,8 @@ class PersistentVendorService:
             manifest.append(self.repo._manifest_entry(self.repo.upload_document(application_id, "GST", gst_upload)))
         if bank_upload:
             manifest.append(self.repo._manifest_entry(self.repo.upload_document(application_id, "BANK", bank_upload)))
-        engine = ProcessingPipeline(self.extractor, approved_lookup=self.repo.approved_lookup)
+        engine = ProcessingPipeline(self.extractor, approved_lookup=self.repo.approved_lookup,
+                                    **self.pipeline_options)
         result = engine.evaluate(vendor, gst_upload, bank_upload, application_id=application_id,
                                  stage_callback=stage_callback, persistence_planned=True)
         try:
@@ -481,7 +513,8 @@ class PersistentVendorService:
             bank_upload, bank_row = self.repo.load_committed_document(application_id, "BANK")
         if bank_row:
             manifest.append(self.repo._manifest_entry(bank_row))
-        engine = ProcessingPipeline(self.extractor, approved_lookup=self.repo.approved_lookup)
+        engine = ProcessingPipeline(self.extractor, approved_lookup=self.repo.approved_lookup,
+                                    **self.pipeline_options)
         result = engine.evaluate(vendor, gst_upload, bank_upload, application_id=application_id,
                                  trigger="resubmission", stage_callback=stage_callback,
                                  persistence_planned=True)

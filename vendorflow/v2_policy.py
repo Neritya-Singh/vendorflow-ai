@@ -171,8 +171,11 @@ def team_flags(run: dict | None) -> list[dict]:
                            else "Same GSTIN as an approved vendor"))
     elif _not_pass(r12) and not _failed(rules.get("R04")):
         flags.append(_flag("R12", MEDIUM, "Records check could not run"))
-    if _failed(rules.get("R15")):
-        flags.append(_flag("R15", HIGH, str(rules["R15"].get("label") or "Bank account used under a different GSTIN")))
+    r15 = rules.get("R15")
+    if _failed(r15):
+        flags.append(_flag("R15", HIGH, str(r15.get("label") or "Bank account used under a different GSTIN")))
+    elif _not_pass(r15) and not _failed(rules.get("R07")) and not _failed(rules.get("R01")):
+        flags.append(_flag("R15", MEDIUM, "Bank reuse check could not run"))
     if _failed(rules.get("R11")):
         flags.append(_flag("R11", MEDIUM, "Bank account holder differs from legal name"))
     if _failed(rules.get("R08")):
@@ -240,3 +243,116 @@ def vendor_team_message(run: dict | None) -> str:
     if any(f["rule_id"] in {"R12", "R15"} for f in team_flags(run)):
         return ADDITIONAL_CHECK
     return TEAM_MESSAGE
+
+
+# ---------------------------------------------------------------- B2 records screening
+# V2_01 §6: duplicate GSTIN across approved, pending and rejected applications, and
+# the same bank account (number + IFSC) under a different GSTIN. Both route to the
+# team; the vendor only ever sees ADDITIONAL_CHECK. Staff wording lives in `label`
+# (short reason) and `admin_detail` (one or two sentences naming the linked cases).
+
+STATUS_WORDS = {"APPROVED": "approved", "REJECTED": "rejected", "PENDING": "open"}
+_STATUS_PRIORITY = {"APPROVED": 0, "REJECTED": 1, "PENDING": 2}
+CASE_ID = re.compile(r"\bVF-[0-9A-F]{12}\b")
+
+
+def _check(rule: str, state: str, code: str, label: str, detail: str, action: str):
+    from .models import CheckResult, CheckState
+    return CheckResult(rule_id=rule, state=CheckState(state), code=code, label=label,
+                       vendor_message=ADDITIONAL_CHECK if state != "PASS" else "Records check completed.",
+                       admin_detail=detail, next_action=action)
+
+
+def _listing(records: list[dict]) -> str:
+    return ", ".join(f"{r['id']} ({STATUS_WORDS.get(r['status'], 'open')})" for r in records)
+
+
+def gstin_check(v, application_id: str, registry) -> "CheckResult":
+    from .rules import GSTIN_PATTERN, norm_id
+    gstin = norm_id(v.gstin)
+    action = "Compare with the linked application before deciding"
+    if not GSTIN_PATTERN.fullmatch(gstin):
+        return _check("R12", "UNKNOWN", "DUPLICATE_GSTIN", "Records check waits for a valid GSTIN",
+                      "GSTIN not structurally valid; records not searched.", action)
+    if registry is None:
+        return _check("R12", "UNKNOWN", "DUPLICATE_GSTIN", "Records check could not run",
+                      "No records registry connected.", action)
+    try:
+        matches = registry.records_by_gstin(gstin, application_id)
+    except Exception:
+        return _check("R12", "UNKNOWN", "DUPLICATE_GSTIN", "Records check could not run",
+                      "Records lookup failed; screen manually.", action)
+    if not matches:
+        return _check("R12", "PASS", "DUPLICATE_GSTIN", "No other application with this GSTIN",
+                      "No approved, pending or rejected application uses this GSTIN.", action)
+    matches = sorted(matches, key=lambda r: _STATUS_PRIORITY.get(r["status"], 3))
+    top = matches[0]
+    account = re.sub(r"\s+", "", v.account_number or "")
+    same_bank = top["account_number"] == account and top["ifsc"] == norm_id(v.ifsc)
+    word = STATUS_WORDS.get(top["status"], "open")
+    if top["status"] == "APPROVED" and not same_bank:
+        label = "Same GSTIN as an approved vendor, different bank account"
+        detail = (f"This GSTIN already belongs to approved application {top['id']}, but this application "
+                  "gives a different bank account. This is a common pattern in payment-diversion fraud.")
+    elif top["status"] == "APPROVED":
+        label = "Same GSTIN as an approved vendor"
+        detail = f"This GSTIN already belongs to approved application {top['id']}, with the same bank account."
+    else:
+        label = f"Same GSTIN as a{'n' if word == 'open' else ''} {word} application"
+        detail = (f"This GSTIN is also on {word} application {top['id']}"
+                  f"{', with the same bank account' if same_bank else ', with a different bank account'}.")
+    if len(matches) > 1:
+        detail += f" All matches: {_listing(matches)}."
+    return _check("R12", "FAIL", "DUPLICATE_GSTIN", label, detail, action)
+
+
+def bank_reuse_check(v, application_id: str, registry) -> "CheckResult":
+    from .rules import IFSC_PATTERN, norm_id
+    account, ifsc = re.sub(r"\s+", "", v.account_number or ""), norm_id(v.ifsc)
+    action = "Confirm who owns the bank account before deciding"
+    if not account or not IFSC_PATTERN.fullmatch(ifsc):
+        return _check("R15", "UNKNOWN", "BANK_REUSE", "Bank reuse check waits for valid bank details",
+                      "Account number or IFSC missing/invalid; records not searched.", action)
+    if registry is None:
+        return _check("R15", "UNKNOWN", "BANK_REUSE", "Bank reuse check could not run",
+                      "No records registry connected.", action)
+    try:
+        matches = registry.records_by_bank(account, ifsc, application_id)
+    except Exception:
+        return _check("R15", "UNKNOWN", "BANK_REUSE", "Bank reuse check could not run",
+                      "Records lookup failed; screen manually.", action)
+    gstin = norm_id(v.gstin)
+    others = sorted((r for r in matches if r["gstin"] != gstin), key=lambda r: _STATUS_PRIORITY.get(r["status"], 3))
+    if not others:
+        return _check("R15", "PASS", "BANK_REUSE", "Bank account not used under another GSTIN",
+                      "No other GSTIN uses this account number and IFSC.", action)
+    top = others[0]
+    detail = (f"The same bank account (number and IFSC) is on {STATUS_WORDS.get(top['status'], 'open')} application "
+              f"{top['id']} under a different GSTIN ({top['gstin'] or 'not given'}).")
+    if len(others) > 1:
+        detail += f" All matches: {_listing(others)}."
+    return _check("R15", "FAIL", "BANK_REUSE", "Bank account used under a different GSTIN", detail, action)
+
+
+def records_screening(registry):
+    """Pipeline hook (ProcessingPipeline(screening=...)): returns R12 and R15."""
+    def screen(v, application_id: str):
+        return [gstin_check(v, application_id, registry), bank_reuse_check(v, application_id, registry)]
+    return screen
+
+
+def linked_case_ids(run: dict | None) -> list[str]:
+    """Case IDs named by the saved R12/R15 evidence (staff only)."""
+    found: list[str] = []
+    for check in _checks(run):
+        if check.get("rule_id") in {"R12", "R15"} and check.get("state") == "FAIL":
+            for case_id in CASE_ID.findall(str(check.get("admin_detail") or "")):
+                if case_id not in found:
+                    found.append(case_id)
+    return found
+
+
+def pipeline_options(registry) -> dict:
+    """v2 policy hooks for ProcessingPipeline / PersistentVendorService."""
+    from .rules import norm_legal_name
+    return {"screening": records_screening(registry), "name_key": norm_legal_name}

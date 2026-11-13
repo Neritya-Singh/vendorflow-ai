@@ -287,7 +287,50 @@ def _case_summary(app: dict, run: dict | None, review: dict | None) -> dict:
     }
 
 
-def admin_case(app: dict, runs: list[dict], reviews: list[dict]) -> dict:
+def _mask_account(value: str) -> str:
+    digits = re.sub(r"\s+", "", value or "")
+    return ("•••• " + digits[-4:]) if len(digits) > 4 else ("••••" if digits else "Not given")
+
+
+def linked_records(app: dict, run: dict | None, others: list[dict]) -> list[dict]:
+    """Staff-only evidence for R12/R15: the matching application next to this one."""
+    from vendorflow.rules import norm_id, norm_legal_name
+    mine = app.get("payload_json") or {}
+    match_types: dict[str, list[str]] = {}
+    for check in (run or {}).get("checks_json") or []:
+        if check.get("rule_id") in {"R12", "R15"} and check.get("state") == "FAIL":
+            for case_id in v2.CASE_ID.findall(str(check.get("admin_detail") or "")):
+                label = "Same GSTIN" if check["rule_id"] == "R12" else "Same bank account, different GSTIN"
+                match_types.setdefault(case_id, [])
+                if label not in match_types[case_id]:
+                    match_types[case_id].append(label)
+    out = []
+    for other in others:
+        theirs = other.get("payload_json") or {}
+
+        def acct(p: dict) -> str:
+            return re.sub(r"\s+", "", str(p.get("account_number") or ""))
+        fields = [
+            ("Legal name", mine.get("legal_name"), theirs.get("legal_name"), norm_legal_name),
+            ("GSTIN", mine.get("gstin"), theirs.get("gstin"), norm_id),
+            ("Account holder", mine.get("bank_holder"), theirs.get("bank_holder"), norm_legal_name),
+            ("Account no.", _mask_account(acct(mine)), _mask_account(acct(theirs)), None),
+            ("IFSC", mine.get("ifsc"), theirs.get("ifsc"), norm_id),
+            ("Contact email", mine.get("contact_email"), theirs.get("contact_email"), lambda x: (x or "").strip().lower()),
+        ]
+        rows = []
+        for label, this, that, key in fields:
+            same = (acct(mine) == acct(theirs)) if key is None else (key(this) == key(that))
+            rows.append({"field": label, "this": str(this or "Not given"), "other": str(that or "Not given"), "same": same})
+        out.append({
+            "application_id": other.get("id"), "business": theirs.get("legal_name") or "",
+            "status": other.get("current_status"), "status_label": display_status(str(other.get("current_status") or "")),
+            "match": match_types.get(str(other.get("id")), []), "comparison": rows,
+        })
+    return out
+
+
+def admin_case(app: dict, runs: list[dict], reviews: list[dict], linked: list[dict] | None = None) -> dict:
     latest_run = runs[0] if runs else None
     latest_review = reviews[0] if reviews else None
     checks = (latest_run or {}).get("checks_json") or []
@@ -310,6 +353,7 @@ def admin_case(app: dict, runs: list[dict], reviews: list[dict]) -> dict:
                     "evidence": c.get("admin_detail") or c.get("vendor_message") or ""} for c in checks],
         "runs": [_run_detail(r) for r in runs],
         "reviews": [_review_dict(r) for r in reviews],
+        "linked_records": linked_records(app, latest_run, linked or []),
         "can_review": app.get("current_status") == "PENDING" and bool(latest_run),
         "active_correction_request": active_review_request(latest_review, latest_run),
     }

@@ -73,3 +73,63 @@ def test_active_correction_request_puts_case_with_vendor():
     assert v2.staff_summary(PENDING, r, review)["reason"] == "Correction requested from vendor"
     older = {"action": "REQUEST_CORRECTION", "created_at": "2026-11-13T09:00:00+00:00"}
     assert v2.case_owner(PENDING, r, older) == v2.TEAM  # superseded by the newer run
+
+
+# ---------------------------------------------------------------- B2 screening + names
+from vendorflow.models import VendorSubmission  # noqa: E402
+from vendorflow.rules import norm_legal_name, norm_name  # noqa: E402
+
+V = VendorSubmission(legal_name="Acme Widgets Private Limited", gstin="09ABCDE1234F1Z5", pan="ABCDE1234F",
+                     account_number="001234567890", ifsc="DEMO0123456", bank_holder="Acme Widgets Private Limited",
+                     contact_email="a@example.com", contact_name="A", business_state="UTTAR PRADESH")
+
+
+class Registry:
+    def __init__(self, by_gstin=(), by_bank=(), boom=False):
+        self.by_gstin, self.by_bank, self.boom = list(by_gstin), list(by_bank), boom
+
+    def records_by_gstin(self, gstin, application_id):
+        if self.boom:
+            raise RuntimeError("down")
+        return self.by_gstin
+
+    def records_by_bank(self, account, ifsc, application_id):
+        if self.boom:
+            raise RuntimeError("down")
+        return self.by_bank
+
+
+def rec(case_id, status, gstin="09ABCDE1234F1Z5", account="001234567890", ifsc="DEMO0123456"):
+    return {"id": case_id, "status": status, "gstin": gstin, "legal_name": "x", "account_number": account, "ifsc": ifsc}
+
+
+def test_gstin_check_across_statuses():
+    assert v2.gstin_check(V, "VF-AAAAAAAAAAAA", Registry()).state.value == "PASS"
+    c = v2.gstin_check(V, "VF-AAAAAAAAAAAA", Registry([rec("VF-000000000002", "PENDING"),
+                                                       rec("VF-000000000001", "APPROVED", account="999")]))
+    assert c.state.value == "FAIL" and c.label == "Same GSTIN as an approved vendor, different bank account"
+    assert v2.CASE_ID.findall(c.admin_detail) == ["VF-000000000001", "VF-000000000001", "VF-000000000002"]
+    assert c.vendor_message == v2.ADDITIONAL_CHECK and "VF-" not in c.vendor_message
+    assert v2.gstin_check(V, "x", Registry([rec("VF-000000000003", "REJECTED")])).label == "Same GSTIN as a rejected application"
+    assert v2.gstin_check(V, "x", Registry(boom=True)).state.value == "UNKNOWN"
+    assert v2.gstin_check(V, "x", None).state.value == "UNKNOWN"
+
+
+def test_bank_reuse_only_counts_other_gstins():
+    same_gstin = rec("VF-000000000004", "APPROVED")
+    assert v2.bank_reuse_check(V, "x", Registry(by_bank=[same_gstin])).state.value == "PASS"
+    other = rec("VF-000000000005", "REJECTED", gstin="27ZZZZZ9999Z1Z5")
+    c = v2.bank_reuse_check(V, "x", Registry(by_bank=[same_gstin, other]))
+    assert c.state.value == "FAIL" and "VF-000000000005" in c.admin_detail and "VF-000000000004" not in c.admin_detail
+    assert v2.bank_reuse_check(V.model_copy(update={"ifsc": "bad"}), "x", Registry()).state.value == "UNKNOWN"
+    flags = v2.team_flags({"checks_json": [{"rule_id": "R15", "state": "FAIL", "label": c.label, "admin_detail": c.admin_detail}]})
+    assert flags == [{"rule_id": "R15", "risk": v2.HIGH, "reason": "Bank account used under a different GSTIN"}]
+
+
+def test_legal_suffix_normaliser():
+    assert norm_legal_name("Acme Widgets Pvt. Ltd.") == norm_legal_name("ACME WIDGETS PRIVATE LIMITED")
+    assert norm_legal_name("M/s Sample & Sons Co.") == norm_legal_name("Sample and Sons Company")
+    assert norm_legal_name("Acme Widgets") != norm_legal_name("Acme Widgets Private Limited")  # suffix still matters
+    assert norm_legal_name("Ravi Example") != norm_legal_name("Acme Widgets Private Limited")
+    # v1.1 strict comparison is untouched for callers that do not opt in.
+    assert norm_name("Acme Widgets Pvt Ltd") != norm_name("Acme Widgets Private Limited")

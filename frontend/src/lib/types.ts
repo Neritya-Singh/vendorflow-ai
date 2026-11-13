@@ -227,6 +227,16 @@ export interface AdminCase {
   checks: { rule_id: string; label: string; state: CheckState; evidence: string }[];
   runs: RunDetail[];
   reviews: ReviewRecord[];
+  linked_records: LinkedRecord[];
   can_review: boolean;
   active_correction_request: boolean;
+}
+
+export interface LinkedRecord {
+  application_id: string;
+  business: string;
+  status: Status;
+  status_label: string;
+  match: string[];
+  comparison: { field: string; this: string; other: string; same: boolean }[];
 }

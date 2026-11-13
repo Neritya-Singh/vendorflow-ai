@@ -375,7 +375,8 @@ def test_queue_tabs_risk_and_reason(client):
     happy, hgst, hbank = fixture("happy")
     vendor_creds, response = submit(client, happy, hbank, hgst)  # swapped -> waiting on vendor
     stream_events(response)
-    approved_creds, response = submit(client, happy, hgst, hbank)
+    other, ogst, obank = fixture("frontend_happy")
+    approved_creds, response = submit(client, other, ogst, obank)
     stream_events(response)
     admin(client)
     overview = client.get("/api/admin/overview").json()
@@ -409,3 +410,95 @@ def test_draft_rows_are_excluded_from_queue_and_metrics():
     overview = client.get("/api/admin/overview").json()
     assert "VF-0000000000AA" not in {r["application_id"] for r in overview["queue"]}
     assert overview["metrics"]["total"] == 1
+
+
+# ---------------------------------------------------------------- B2 records screening
+
+def approve_first(client, name: str = "happy") -> dict:
+    fields, gst, bank = fixture(name)
+    creds, response = submit(client, fields, gst, bank)
+    assert result_of(stream_events(response))["status"] == "APPROVED"
+    return creds
+
+
+def test_same_gstin_as_approved_vendor_with_new_bank_is_high_risk_and_linked(client):
+    first = approve_first(client)
+    fields, gst, bank = fixture("ec3_duplicate_changed_bank")
+    creds, response = submit(client, fields, gst, bank)
+    result = result_of(stream_events(response))
+    assert result["status"] == "PENDING" and result["owner"] == "TEAM"
+    assert result["reasons"] == ["Our team is completing an additional check. No action is needed from you."]
+    vendor_safe(result)
+    assert first["application_id"] not in json.dumps(result)
+    admin(client)
+    case = client.get(f"/api/admin/applications/{creds['application_id']}").json()
+    assert case["risk"] == "HIGH"
+    assert case["primary_issue"] == "Same GSTIN as an approved vendor, different bank account"
+    linked = case["linked_records"]
+    assert [r["application_id"] for r in linked] == [first["application_id"]] and linked[0]["status"] == "APPROVED"
+    rows = {r["field"]: r for r in linked[0]["comparison"]}
+    assert rows["GSTIN"]["same"] is True and rows["Account no."]["same"] is False
+    assert fields["account_number"] not in json.dumps(linked)  # masked
+    queue = client.get("/api/admin/overview").json()["queue"]
+    assert queue[0]["application_id"] == creds["application_id"] and queue[0]["risk"] == "HIGH"
+
+
+def test_same_gstin_as_pending_or_rejected_application_goes_to_team(client):
+    fields, gst, bank = fixture("ec2_bank_owner")
+    pending, response = submit(client, fields, gst, bank)
+    first_run = result_of(stream_events(response))
+    happy, hgst, hbank = fixture("happy")
+    creds, response = submit(client, happy, hgst, hbank)
+    assert result_of(stream_events(response))["owner"] == "TEAM"
+    csrf = admin(client)
+    case = client.get(f"/api/admin/applications/{creds['application_id']}").json()
+    assert case["primary_issue"] == "Same GSTIN as an open application"
+    assert case["linked_records"][0]["application_id"] == pending["application_id"]
+    client.post(f"/api/admin/applications/{pending['application_id']}/review", headers={"x-csrf-token": csrf},
+                json={"action": "REJECT", "reason": "Bank account belongs to an individual.",
+                      "expected_revision": 1, "expected_latest_run_id": first_run["latest_run_id"]})
+    again, response = submit(client, happy, hgst, hbank)
+    stream_events(response)
+    case = client.get(f"/api/admin/applications/{again['application_id']}").json()
+    # The rejected application outranks the still-open one in the reason.
+    assert case["primary_issue"] == "Same GSTIN as a rejected application"
+    assert case["risk"] == "HIGH"
+
+
+def test_bank_account_reused_under_different_gstin(client):
+    approve_first(client)
+    happy = fixture("happy")[0]
+    fields, gst, _ = fixture("frontend_happy")
+    _, _, happy_bank = fixture("happy")
+    fields = {**fields, "account_number": happy["account_number"], "ifsc": happy["ifsc"],
+              "bank_holder": fields["legal_name"]}
+    creds, response = submit(client, fields, gst, happy_bank)
+    result = result_of(stream_events(response))
+    assert result["owner"] == "TEAM"
+    vendor_safe(result)
+    admin(client)
+    case = client.get(f"/api/admin/applications/{creds['application_id']}").json()
+    assert case["primary_issue"] == "Bank account used under a different GSTIN" and case["risk"] == "HIGH"
+    assert case["linked_records"][0]["match"] == ["Same bank account, different GSTIN"]
+    r15 = next(c for c in case["checks"] if c["rule_id"] == "R15")
+    assert r15["state"] == "FAIL" and "under a different GSTIN" in r15["evidence"]
+
+
+def test_drafts_and_self_never_count_as_duplicates():
+    provider = ServiceProvider(settings())
+    client = TestClient(create_app(settings(), provider))
+    fields, gst, bank = fixture("happy")
+    provider.repo().client.table("applications").insert({
+        "id": "VF-0000000000AB", "payload_json": dict(fields), "current_status": "PENDING",
+        "decision_source": "AUTOMATED", "tracking_token_hash": "x"}).execute()
+    creds, response = submit(client, fields, gst, bank)
+    result = result_of(stream_events(response))
+    assert result["status"] == "APPROVED"  # the zero-run draft with the same GSTIN is ignored
+    # Self-exclusion on resubmission is covered by test_bank_holder_mismatch_correction_loop_to_approval.
+
+
+def test_legal_suffix_variant_of_bank_holder_is_approved(client):
+    fields, gst, bank = fixture("happy")
+    assert fields["legal_name"] == "Acme Widgets Private Limited"
+    _, response = submit(client, {**fields, "bank_holder": "ACME WIDGETS PVT. LTD."}, gst, bank)
+    assert result_of(stream_events(response))["status"] == "APPROVED"

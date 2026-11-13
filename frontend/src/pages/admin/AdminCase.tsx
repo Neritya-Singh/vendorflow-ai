@@ -8,7 +8,7 @@ import { StageList } from "../../components/StageList";
 import { Alert, Button, Card, CardHeader, CheckIcon, KeyValue, Pill, RiskTag, Spinner, StatusBadge, Textarea, cx } from "../../components/ui";
 import { ApiError, api } from "../../lib/api";
 import { formatDateTime, formatDuration } from "../../lib/format";
-import type { AdminCase as Case, ComparisonRow, RunDetail } from "../../lib/types";
+import type { AdminCase as Case, ComparisonRow, LinkedRecord, RunDetail } from "../../lib/types";
 import { useAdmin } from "./AdminLayout";
 
 type Action = "REQUEST_CORRECTION" | "APPROVE" | "REJECT";
@@ -325,6 +325,50 @@ function DecisionPanel({ c, onDone }: { c: Case; onDone: (next: Case, message: s
   );
 }
 
+/** Staff-only: the existing application this case matches, values side by side. */
+function LinkedRecordCard({ record }: { record: LinkedRecord }) {
+  return (
+    <Card className="border-red-200">
+      <CardHeader
+        title={
+          <span className="inline-flex flex-wrap items-center gap-2">
+            Linked record
+            <Link to={`/admin/cases/${record.application_id}`} className="font-mono text-[13px] font-medium text-navy-700 hover:underline">
+              Open {record.application_id}
+            </Link>
+            <StatusBadge status={record.status} />
+          </span>
+        }
+        description={`${record.match.join(" · ")} — ${record.business || "Unnamed business"}`}
+      />
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[520px] text-left text-sm">
+          <thead className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500">
+            <tr>
+              <th scope="col" className="px-4 py-2">Field</th>
+              <th scope="col" className="px-4 py-2">This application</th>
+              <th scope="col" className="px-4 py-2">{record.application_id}</th>
+              <th scope="col" className="px-4 py-2"><span className="sr-only">Match</span></th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {record.comparison.map((row) => (
+              <tr key={row.field} className={row.same ? undefined : "bg-amber-50/60"}>
+                <th scope="row" className="px-4 py-2 font-normal text-slate-600">{row.field}</th>
+                <td className="px-4 py-2 font-mono text-[13px] text-slate-900">{row.this}</td>
+                <td className="px-4 py-2 font-mono text-[13px] text-slate-900">{row.other}</td>
+                <td className="px-4 py-2 text-xs font-medium">
+                  {row.same ? <span className="text-teal-700">Same</span> : <span className="text-amber-800">Differs</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
 export function AdminCase() {
   const { id = "" } = useParams();
   const { onUnauthorized } = useAdmin();
@@ -408,6 +452,7 @@ export function AdminCase() {
 
       <div className="mt-5 grid items-start gap-5 lg:grid-cols-[1fr_380px]">
         <div className="grid min-w-0 gap-5">
+          {c.linked_records.map((r) => <LinkedRecordCard key={r.application_id} record={r} />)}
           {latestRun ? (
             <>
               <Issues c={c} />
