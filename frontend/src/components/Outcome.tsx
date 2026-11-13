@@ -1,81 +1,61 @@
-import { CheckCircle2, ClipboardCheck, FileText, History, KeyRound, MessageSquareText, ShieldAlert, TriangleAlert, XCircle } from "lucide-react";
-import { useState } from "react";
+import { CheckCircle2, CircleDashed, FileText, History, KeyRound, MessageSquareText, ShieldAlert, TriangleAlert, Users, XCircle } from "lucide-react";
 import { formatDateTime, formatDuration } from "../lib/format";
-import type { Credentials, TimelineItem, VendorCheck, VendorView } from "../lib/types";
+import type { Credentials, TimelineItem, VendorView } from "../lib/types";
 import { StageList } from "./StageList";
-import { Alert, Card, CardHeader, CheckIcon, CopyValue, StatusBadge, cx } from "./ui";
+import { Alert, Card, CardHeader, CopyValue, StatusBadge, cx } from "./ui";
 
-const HERO = {
-  APPROVED: {
-    ring: "border-teal-200",
-    band: "bg-teal-50",
-    icon: CheckCircle2,
-    iconColor: "text-teal-700",
-    title: "Approved",
-  },
-  PENDING: {
-    ring: "border-amber-200",
-    band: "bg-amber-50",
-    icon: TriangleAlert,
-    iconColor: "text-amber-600",
-    title: "Pending Review",
-  },
-  REJECTED: {
-    ring: "border-red-200",
-    band: "bg-red-50",
-    icon: XCircle,
-    iconColor: "text-red-700",
-    title: "Rejected",
-  },
-} as const;
+type HeroKey = "APPROVED" | "REJECTED" | "VENDOR" | "TEAM" | "DRAFT";
+const HERO: Record<HeroKey, { ring: string; band: string; icon: typeof CheckCircle2; iconColor: string; dot: string }> = {
+  APPROVED: { ring: "border-teal-200", band: "bg-teal-50", icon: CheckCircle2, iconColor: "text-teal-700", dot: "bg-teal-500" },
+  REJECTED: { ring: "border-red-200", band: "bg-red-50", icon: XCircle, iconColor: "text-red-700", dot: "bg-red-500" },
+  VENDOR: { ring: "border-amber-200", band: "bg-amber-50", icon: TriangleAlert, iconColor: "text-amber-600", dot: "bg-amber-500" },
+  TEAM: { ring: "border-navy-200", band: "bg-navy-50", icon: Users, iconColor: "text-navy-700", dot: "bg-navy-500" },
+  DRAFT: { ring: "border-slate-200", band: "bg-slate-50", icon: CircleDashed, iconColor: "text-slate-500", dot: "bg-slate-400" },
+};
 
-/** The single authoritative outcome: status, the main reasons and one next action. */
+export function heroKey(view: Pick<VendorView, "status" | "owner">): HeroKey {
+  if (view.status === "APPROVED" || view.status === "REJECTED") return view.status;
+  return view.owner === "VENDOR" || view.owner === "DRAFT" ? view.owner : "TEAM";
+}
+
+/** The single authoritative outcome: status, who acts next, exactly what is needed. */
 export function DecisionCard({ view }: { view: VendorView }) {
-  const hero = HERO[view.status] ?? HERO.PENDING;
+  const hero = HERO[heroKey(view)];
   const Icon = hero.icon;
-  const subtitle =
-    view.status === "APPROVED"
-      ? view.decision_source === "MANUAL"
-        ? "Approved after human review"
-        : "All onboarding document checks passed"
-      : view.status === "REJECTED"
-        ? "Final decision by a reviewer"
-        : view.processing_unavailable
-          ? "Document processing temporarily unavailable"
-          : view.owner === "Reviewer"
-            ? "Waiting for the review team"
-            : "Action needed from you";
   return (
-    <Card className={cx("overflow-hidden", hero.ring)} aria-live="polite">
+    <Card className={cx("overflow-hidden", hero.ring)} aria-live="polite" data-status={view.status} data-owner={view.owner}>
       <div className={cx("flex items-start gap-4 px-5 py-5 sm:px-6", hero.band)}>
         <Icon className={cx("mt-0.5 size-8 shrink-0", hero.iconColor)} aria-hidden />
         <div className="min-w-0">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Decision</p>
-          <h2 className="text-2xl font-semibold tracking-tight text-slate-900">{hero.title}</h2>
-          <p className="mt-0.5 text-sm text-slate-600">{subtitle}</p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{view.status_label}</p>
+          <h2 className="text-2xl font-semibold tracking-tight text-slate-900">{view.heading}</h2>
+          {view.reasons.map((reason) => (
+            <p key={reason} className="mt-1 text-[15px] leading-relaxed text-slate-700">{reason}</p>
+          ))}
         </div>
       </div>
-      <div className="grid gap-5 px-5 py-5 sm:px-6 md:grid-cols-[1.4fr_1fr]">
-        <div>
+      {view.todo.length ? (
+        <div className="border-t border-slate-200 px-5 py-4 sm:px-6">
           <h3 className="text-[13px] font-semibold text-slate-900">
-            {view.status === "APPROVED" ? "Why" : view.reasons.length > 1 ? "Main reasons" : "Reason"}
+            What we need from you ({view.todo.length} {view.todo.length === 1 ? "item" : "items"})
           </h3>
-          <ul className="mt-2 space-y-2">
-            {view.reasons.map((reason) => (
-              <li key={reason} className="flex gap-2 text-sm leading-relaxed text-slate-700">
-                <span aria-hidden className={cx("mt-2 size-1.5 shrink-0 rounded-full", view.status === "APPROVED" ? "bg-teal-500" : view.status === "REJECTED" ? "bg-red-500" : "bg-amber-500")} />
-                {reason}
+          <ol className="mt-2 space-y-2">
+            {view.todo.map((item, i) => (
+              <li key={item.key} className="flex gap-3 text-[15px] leading-relaxed text-slate-800">
+                <span aria-hidden className="grid size-6 shrink-0 place-items-center rounded-full bg-amber-100 text-xs font-semibold text-amber-800">
+                  {i + 1}
+                </span>
+                {item.text}
               </li>
             ))}
-          </ul>
+          </ol>
         </div>
-        <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Next step</p>
-          <p className="mt-1 text-sm font-semibold text-slate-900">{view.heading}</p>
-          <p className="mt-1 text-[13px] leading-relaxed text-slate-600">{view.next_step}</p>
-        </div>
+      ) : null}
+      <div className="border-t border-slate-200 px-5 py-4 sm:px-6">
+        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">What happens next</p>
+        <p className="mt-1 text-sm leading-relaxed text-slate-700">{view.next_step}</p>
       </div>
-      {view.reviewer_note ? (
+      {view.reviewer_note && view.status !== "REJECTED" ? (
         <div className="border-t border-slate-200 px-5 py-4 sm:px-6">
           <div className="flex gap-3">
             <MessageSquareText className="mt-0.5 size-4 shrink-0 text-navy-600" aria-hidden />
@@ -90,6 +70,17 @@ export function DecisionCard({ view }: { view: VendorView }) {
         </div>
       ) : null}
     </Card>
+  );
+}
+
+/** Vendor-facing status pill: says who acts next on a pending application. */
+export function VendorStatusPill({ view }: { view: Pick<VendorView, "status" | "owner" | "status_label"> }) {
+  const hero = HERO[heroKey(view)];
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-2 py-0.5 text-xs font-medium text-slate-700 ring-1 ring-inset ring-slate-300">
+      <span aria-hidden className={cx("size-2 rounded-full", hero.dot)} />
+      {view.status_label}
+    </span>
   );
 }
 
@@ -122,60 +113,10 @@ export function CredentialsCard({ creds, mode }: { creds: Credentials; mode: "be
   );
 }
 
-export function VendorChecks({ checks }: { checks: VendorCheck[] }) {
-  const attention = checks.filter((c) => c.state !== "PASS");
-  const [showPassed, setShowPassed] = useState(attention.length === 0);
-  const passed = checks.filter((c) => c.state === "PASS");
-  return (
-    <Card>
-      <CardHeader
-        title="Checks"
-        description={`${passed.length} passed · ${attention.length} need attention`}
-        action={<ClipboardCheck className="size-4 text-slate-400" aria-hidden />}
-      />
-      <ul className="divide-y divide-slate-100">
-        {attention.map((c) => (
-          <li key={c.label} className="flex gap-3 px-5 py-3">
-            <CheckIcon state={c.state} />
-            <div className="min-w-0">
-              <p className="text-sm font-medium text-slate-900">{c.label}</p>
-              <p className="mt-0.5 text-[13px] text-slate-600">{c.detail}</p>
-            </div>
-          </li>
-        ))}
-        {attention.length === 0 ? (
-          <li className="px-5 py-3 text-sm text-slate-600">No checks need attention.</li>
-        ) : null}
-      </ul>
-      {passed.length ? (
-        <div className="border-t border-slate-100 px-5 py-3">
-          <button
-            type="button"
-            className="text-[13px] font-medium text-navy-700 hover:underline"
-            aria-expanded={showPassed}
-            onClick={() => setShowPassed((v) => !v)}
-          >
-            {showPassed ? "Hide" : "Show"} {passed.length} passed checks
-          </button>
-          {showPassed ? (
-            <ul className="mt-2 grid gap-x-6 gap-y-1.5 sm:grid-cols-2">
-              {passed.map((c) => (
-                <li key={c.label} className="flex items-center gap-2 text-[13px] text-slate-700">
-                  <CheckIcon state="PASS" /> {c.label}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-      ) : null}
-    </Card>
-  );
-}
-
 export function VendorTimeline({ items }: { items: TimelineItem[] }) {
   return (
     <Card>
-      <CardHeader title="History" description="Every saved check and reviewer action, newest first" action={<History className="size-4 text-slate-400" aria-hidden />} />
+      <CardHeader title="History" description="Every check and message from our team, newest first" action={<History className="size-4 text-slate-400" aria-hidden />} />
       <ol className="px-5 py-4">
         {items.map((item, i) => (
           <li key={`${item.kind}-${item.at}-${i}`} className="relative flex gap-3 pb-4 last:pb-0">
@@ -190,11 +131,11 @@ export function VendorTimeline({ items }: { items: TimelineItem[] }) {
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <p className="text-sm font-medium text-slate-900">{item.title}</p>
-                {item.kind === "run" ? <StatusBadge status={item.status} /> : null}
+                {item.kind === "run" && item.status !== "PENDING" ? <StatusBadge status={item.status} /> : null}
               </div>
               <p className="mt-0.5 text-xs text-slate-500">
                 {formatDateTime(item.at)}
-                {item.kind === "run" && item.elapsed_ms != null ? ` · automated check took ${formatDuration(item.elapsed_ms)}` : ""}
+                {item.kind === "run" && item.elapsed_ms != null ? ` · took ${formatDuration(item.elapsed_ms)}` : ""}
               </p>
               {item.message ? <p className="mt-1 text-[13px] text-slate-700">“{item.message}”</p> : null}
               {item.documents?.length ? (
@@ -215,11 +156,11 @@ export function SavedStages({ view }: { view: VendorView }) {
   return (
     <Card>
       <CardHeader
-        title="How this decision was made"
-        description={view.elapsed_ms != null ? `Latest automated check · ${formatDuration(view.elapsed_ms)} measured on the server` : "Latest automated check"}
+        title="How we checked your application"
+        description={view.elapsed_ms != null ? `Latest check · took ${formatDuration(view.elapsed_ms)}` : "Latest check"}
       />
       <div className="px-5 py-4">
-        <StageList rows={view.stages} />
+        <StageList rows={view.stages} audience="vendor" />
       </div>
     </Card>
   );

@@ -3,10 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { PageHeader } from "../components/AppShell";
 import { FilePicker } from "../components/FilePicker";
-import { DecisionCard, SavedStages, ScopeNote, VendorChecks, VendorTimeline } from "../components/Outcome";
+import { DecisionCard, SavedStages, ScopeNote, VendorStatusPill, VendorTimeline } from "../components/Outcome";
 import { ProcessingPanel } from "../components/ProcessingPanel";
 import { BankSection, BusinessSection, type FieldErrors } from "../components/VendorFormSections";
-import { Alert, Button, Card, CardHeader, Field, Input, Spinner, StatusBadge } from "../components/ui";
+import { Alert, Button, Card, CardHeader, Field, Input, Spinner } from "../components/ui";
 import { ApiError, api } from "../lib/api";
 import { EMAIL_PATTERN } from "../lib/format";
 import { EMPTY_FIELDS, type Credentials, type VendorFields, type VendorView } from "../lib/types";
@@ -131,8 +131,8 @@ function CorrectionForm({ view, creds, onSaved, retryOnly }: {
       <Card ref={panel} className="border-amber-200">
         <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
           <div>
-            <h2 className="text-[15px] font-semibold text-slate-900">Retry the document check</h2>
-            <p className="mt-0.5 text-[13px] text-slate-600">Runs the same details and saved PDFs again. Nothing needs to change.</p>
+            <h2 className="text-[15px] font-semibold text-slate-900">Try the check again</h2>
+            <p className="mt-0.5 text-[13px] text-slate-600">Runs the same details and documents again. Nothing needs to change.</p>
           </div>
           <Button icon={RotateCcw} onClick={() => void submit(toFields(view.submitted), { gst: null, bank: null })}>
             Retry check now
@@ -145,11 +145,11 @@ function CorrectionForm({ view, creds, onSaved, retryOnly }: {
   return (
     <Card>
       <CardHeader
-        title={view.needs_resume ? "Resume your submission" : "Correct and resubmit"}
+        title={view.needs_resume ? "Continue your application" : "Fix the items above"}
         description={
           view.needs_resume
-            ? "Your first submission was interrupted before a decision was saved. Upload your PDFs again to finish it."
-            : "Change only what needs fixing. Your current PDFs are kept unless you upload a replacement; your application ID stays the same."
+            ? "Your application was started but not checked yet. Upload your documents again to finish it."
+            : "Change only what's listed above. Your current documents are kept unless you upload a replacement; your application ID stays the same."
         }
       />
       <form
@@ -185,7 +185,7 @@ function CorrectionForm({ view, creds, onSaved, retryOnly }: {
           </section>
         </div>
         <div className="flex justify-end border-t border-slate-200 bg-slate-50/60 px-5 py-4">
-          <Button type="submit" size="lg" icon={Send}>{view.needs_resume ? "Submit for checking" : "Resubmit for checking"}</Button>
+          <Button type="submit" size="lg" icon={Send}>{view.needs_resume ? "Submit for checking" : "Re-check"}</Button>
         </div>
       </form>
     </Card>
@@ -256,7 +256,7 @@ export function TrackPage() {
         description={
           <span className="inline-flex flex-wrap items-center gap-2">
             <span className="font-mono text-[13px]">{view.application_id}</span>
-            <StatusBadge status={view.status} />
+            <VendorStatusPill view={view} />
           </span>
         }
         action={<Button variant="secondary" icon={LogOut} onClick={signOut}>Sign out</Button>}
@@ -266,10 +266,9 @@ export function TrackPage() {
         {view.needs_resume ? null : <DecisionCard view={view} />}
         <div className="grid items-start gap-5 lg:grid-cols-[1.5fr_1fr]">
           <div className="grid gap-5">
-            {view.editable || view.needs_resume ? (
-              <CorrectionForm key={formKey} view={view} creds={creds} onSaved={onSaved} retryOnly={view.processing_unavailable} />
+            {view.editable || view.needs_resume || view.retry_available ? (
+              <CorrectionForm key={formKey} view={view} creds={creds} onSaved={onSaved} retryOnly={view.retry_available && !view.editable} />
             ) : null}
-            {view.checks.length ? <VendorChecks checks={view.checks} /> : null}
             {view.stages.some((s) => s.state !== "NOT_RUN") ? <SavedStages view={view} /> : null}
           </div>
           <div className="grid gap-5">
@@ -288,7 +287,7 @@ export function TrackPage() {
                 </ul>
               </Card>
             ) : null}
-            {!view.editable && !view.needs_resume ? (
+            {view.status !== "PENDING" ? (
               <Alert tone="info" title="Final decision">This application can no longer be changed.</Alert>
             ) : null}
             <ScopeNote />

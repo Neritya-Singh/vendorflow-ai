@@ -20,6 +20,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from vendorflow import v2_policy as v2
 from vendorflow.gemini_extractor import safe_model_name
 from vendorflow.models import StageEvent, VendorSubmission
 from vendorflow.pdf_reader import MAX_PDF_BYTES, PDFInput, UploadError, read_pdf
@@ -28,7 +29,7 @@ from vendorflow.persistence import (
     prepare_intake,
 )
 from vendorflow.pipeline import MinimumIntakeError
-from vendorflow.rules import GST_STATE_CODES
+from vendorflow.rules import GST_STATE_CODES, normalize_submission
 
 from . import presenters
 from .config import Settings, load_settings
@@ -158,7 +159,10 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         events: queue.Queue = queue.Queue()
 
         def callback(event: StageEvent) -> None:
-            events.put({"type": "stage", **event.model_dump(mode="json")})
+            # Vendor stream: real stage IDs, states and times only. Internal notes
+            # (provider diagnostics, screening outcomes) stay in the saved run for staff.
+            events.put({"type": "stage", **event.model_dump(mode="json"), "note": "",
+                        "label": presenters.VENDOR_STAGES.get(event.stage_id, "")})
 
         def worker() -> None:
             try:
@@ -206,8 +210,8 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
     @app.get("/api/meta")
     def meta():
         return {"states": sorted(s.title().replace(" And ", " and ") for s in GST_STATE_CODES),
-                "max_pdf_bytes": MAX_PDF_BYTES,
-                "stages": [{"stage_id": s, "label": label} for s, label in presenters.STAGES]}
+                "max_pdf_bytes": MAX_PDF_BYTES, "workspace_name": settings.workspace_name,
+                "stages": [{"stage_id": s, "label": presenters.VENDOR_STAGES[s]} for s, _ in presenters.STAGES]}
 
     # ------------------------------------------------------------ vendor
     @app.post("/api/vendor/intake")
@@ -254,7 +258,8 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             saved = service.repo.runs_for_application(application_id)
             manifest = next((r.get("document_manifest") or [] for r in saved
                              if r.get("id") == receipt.result.run_id), [])
-            return presenters.receipt_view(application_id, receipt.result, vendor.model_dump(), manifest)
+            return presenters.receipt_view(application_id, receipt.result, vendor.model_dump(), manifest,
+                                           buyer=settings.workspace_name)
 
         return stream(work)
 
@@ -268,7 +273,7 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             reviews = repo.review_history(application_id)
         except Exception as exc:
             raise fail(exc) from None
-        return presenters.vendor_view(record, runs, reviews)
+        return presenters.vendor_view(record, runs, reviews, buyer=settings.workspace_name)
 
     @app.post("/api/vendor/resubmit")
     async def resubmit(
@@ -294,6 +299,22 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             raise HTTPException(400, "Legal name and contact email are required.")
         gst = await read_upload(gst_pdf, "GST certificate")
         bank = await read_upload(bank_pdf, "Bank proof")
+        # Ownership is enforced server-side: a case "with our team" cannot be edited by
+        # the vendor. The only exception is an unchanged retry after a processing outage.
+        try:
+            repo = provider.repo()
+            runs = repo.runs_for_application(application_id)
+            reviews = repo.review_history(application_id)
+        except Exception as exc:
+            raise fail(exc) from None
+        latest_run = runs[0] if runs else None
+        owner = v2.case_owner(record, latest_run, reviews[0] if reviews else None)
+        if owner != v2.VENDOR:
+            saved = VendorSubmission(**(record.get("payload_json") or {}))
+            unchanged = (gst is None and bank is None
+                         and normalize_submission(vendor) == normalize_submission(saved))
+            if not (v2.extraction_outage(latest_run) and unchanged):
+                raise HTTPException(409, "Your application is with our team. No changes are needed from you right now.")
         service = provider.service()
 
         def work(callback):
@@ -301,7 +322,8 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
                              stage_callback=callback, expected_revision=expected_revision,
                              expected_latest_run_id=expected_latest_run_id)
             fresh, runs = service.track(application_id, tracking_code)
-            return presenters.vendor_view(fresh, runs, service.repo.review_history(application_id))
+            return presenters.vendor_view(fresh, runs, service.repo.review_history(application_id),
+                                          buyer=settings.workspace_name)
 
         return stream(work)
 

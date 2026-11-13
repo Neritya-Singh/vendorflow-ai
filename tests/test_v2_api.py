@@ -158,8 +158,9 @@ def test_swapped_pdfs_route_to_pending_with_swap_guidance(client):
     fields, gst, bank = fixture("happy")
     _, response = submit(client, fields, bank, gst)
     result = result_of(stream_events(response))
-    assert result["status"] == "PENDING"
-    assert "wrong upload fields" in result["reasons"][0]
+    assert result["status"] == "PENDING" and result["owner"] == "VENDOR"
+    assert result["status_label"] == "Action needed from you" and result["editable"] is True
+    assert "files look swapped" in result["todo"][0]["text"]
     s3 = next(s for s in result["stages"] if s["stage_id"] == "S3")
     assert s3["state"] == "SKIPPED"
 
@@ -168,8 +169,8 @@ def test_unreadable_bank_pdf_routes_to_pending(client):
     fields, gst, _ = fixture("happy")
     _, response = submit(client, fields, gst, blank_pdf())
     result = result_of(stream_events(response))
-    assert result["status"] == "PENDING"
-    assert result["reasons"][0].startswith("We couldn't read your bank document")
+    assert result["status"] == "PENDING" and result["owner"] == "VENDOR"
+    assert result["todo"][0]["text"].startswith("We couldn't read your bank document")
 
 
 def test_gemini_outage_is_truthful_retry_not_unreadable_documents():
@@ -180,10 +181,17 @@ def test_gemini_outage_is_truthful_retry_not_unreadable_documents():
     s3 = [e for e in events if e["type"] == "stage" and e["stage_id"] == "S3"]
     assert s3[-1]["event"] == "FAILED"
     result = result_of(events)
-    assert result["status"] == "PENDING" and result["processing_unavailable"] is True
-    assert result["reasons"][0].startswith("Document processing was temporarily unavailable")
-    assert not any("couldn't read" in r or "unreadable" in r.lower() for r in result["reasons"])
-    assert result["heading"] == "Retry the document check"
+    assert result["status"] == "PENDING" and result["owner"] == "TEAM"
+    assert result["retry_available"] is True and result["editable"] is False and result["todo"] == []
+    assert result["reasons"][0].startswith("We couldn't read your documents just now because of a temporary problem")
+    assert result["heading"] == "With our team — no action needed"
+    # An unchanged retry is allowed; edits are not, because the case is with the team.
+    tracked = client.post("/api/vendor/track", json=creds).json()
+    base = {**creds, "expected_revision": tracked["revision"], "expected_latest_run_id": tracked["latest_run_id"]}
+    edited = client.post("/api/vendor/resubmit", data={**fields, **base, "ifsc": "HDFC0000001"})
+    assert edited.status_code == 409
+    retry = client.post("/api/vendor/resubmit", data={**fields, **base})
+    assert result_of(stream_events(retry))["owner"] == "TEAM"
 
 
 def test_duplicate_gstin_is_staff_only(client):
@@ -310,8 +318,9 @@ def test_missing_documents_still_create_pending_application(client):
     fields, _, _ = fixture("happy")
     _, response = submit(client, fields, None, None)
     result = result_of(stream_events(response))
-    assert result["status"] == "PENDING"
-    assert "missing" in result["reasons"][0].lower()
+    assert result["status"] == "PENDING" and result["owner"] == "VENDOR"
+    texts = [t["text"] for t in result["todo"]]
+    assert "Upload your GST certificate." in texts and "Upload your bank document." in texts
 
 
 def test_offline_mode_refuses_configured_supabase(monkeypatch):
@@ -326,3 +335,77 @@ def test_unknown_api_route_and_health(client):
     assert client.get("/api/nope").status_code == 404
     health = client.get("/api/health").json()
     assert health["mode"] == "offline" and "key" not in json.dumps(health).lower()
+
+
+# ---------------------------------------------------------------- B1 ownership
+
+BANNED_VENDOR_WORDS = ("fraud", "duplicate", "suspicious", "failed", "identity screening", "gemini")
+
+
+def vendor_safe(view: dict) -> None:
+    blob = json.dumps(view).lower()
+    for word in BANNED_VENDOR_WORDS:
+        assert word not in blob, word
+    assert '"checks"' not in blob and '"rule_id"' not in blob
+    assert not any(s["note"] for s in view["stages"])
+
+
+def test_with_our_team_case_is_not_editable_by_vendor(client):
+    fields, gst, bank = fixture("ec2_bank_owner")
+    creds, response = submit(client, fields, gst, bank)
+    events = stream_events(response)
+    assert all(e["note"] == "" for e in events if e["type"] == "stage")  # no internal notes streamed
+    result = result_of(events)
+    assert result["owner"] == "TEAM" and result["status_label"] == "With our team"
+    assert result["editable"] is False and result["todo"] == []
+    assert result["reasons"][0].startswith("Thanks, your application is with our team")
+    vendor_safe(result)
+    tracked = client.post("/api/vendor/track", json=creds).json()
+    vendor_safe(tracked)
+    blocked = client.post("/api/vendor/resubmit", data={
+        **fields, **creds, "expected_revision": tracked["revision"],
+        "expected_latest_run_id": tracked["latest_run_id"]})
+    assert blocked.status_code == 409 and "with our team" in blocked.json()["detail"]
+
+
+def test_queue_tabs_risk_and_reason(client):
+    fields, gst, bank = fixture("ec2_bank_owner")
+    team_creds, response = submit(client, fields, gst, bank)
+    stream_events(response)
+    happy, hgst, hbank = fixture("happy")
+    vendor_creds, response = submit(client, happy, hbank, hgst)  # swapped -> waiting on vendor
+    stream_events(response)
+    approved_creds, response = submit(client, happy, hgst, hbank)
+    stream_events(response)
+    admin(client)
+    overview = client.get("/api/admin/overview").json()
+    rows = {r["application_id"]: r for r in overview["queue"]}
+    team = rows[team_creds["application_id"]]
+    assert team["tab"] == "NEEDS_REVIEW" and team["risk"] == "MEDIUM"
+    assert team["reason"] == "Bank account holder differs from legal name"
+    vendor = rows[vendor_creds["application_id"]]
+    assert vendor["tab"] == "WAITING_ON_VENDOR" and vendor["risk"] is None
+    assert vendor["reason"] == "Waiting for vendor: files look swapped"
+    assert rows[approved_creds["application_id"]]["tab"] == "APPROVED"
+    assert overview["queue"][0]["tab"] == "NEEDS_REVIEW"
+    m = overview["metrics"]
+    assert (m["needs_review"], m["waiting_on_vendor"], m["approved"], m["total"]) == (1, 1, 1, 3)
+    case = client.get(f"/api/admin/applications/{team_creds['application_id']}").json()
+    assert case["owner"] == "TEAM" and case["owner_label"] == "Needs review"
+    assert case["flags"][0]["rule_id"] == "R11"
+
+
+def test_draft_rows_are_excluded_from_queue_and_metrics():
+    provider = ServiceProvider(settings())
+    client = TestClient(create_app(settings(), provider))
+    fields, gst, bank = fixture("happy")
+    creds, response = submit(client, fields, gst, bank)
+    stream_events(response)
+    # An application row with zero runs (interrupted intake / future invite).
+    provider.repo().client.table("applications").insert({
+        "id": "VF-0000000000AA", "payload_json": {"legal_name": "SAMPLE Draft Co", "gstin": fields["gstin"]},
+        "current_status": "PENDING", "decision_source": "AUTOMATED", "tracking_token_hash": "x"}).execute()
+    admin(client)
+    overview = client.get("/api/admin/overview").json()
+    assert "VF-0000000000AA" not in {r["application_id"] for r in overview["queue"]}
+    assert overview["metrics"]["total"] == 1

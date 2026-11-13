@@ -1,10 +1,10 @@
 import { ChevronRight, Inbox, RefreshCw, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { Alert, Button, Card, EmptyState, Input, Pill, Select, Spinner, StatusBadge, cx } from "../../components/ui";
+import { Alert, Button, Card, EmptyState, Input, Pill, RiskTag, Select, Spinner, StatusBadge, cx } from "../../components/ui";
 import { api } from "../../lib/api";
-import { formatDateTime, formatDuration } from "../../lib/format";
-import type { Overview, Status } from "../../lib/types";
+import { formatDateTime } from "../../lib/format";
+import type { Overview, QueueRow, QueueTab } from "../../lib/types";
 import { useAdmin } from "./AdminLayout";
 
 function Metric({ label, value, tone, sub }: { label: string; value: string | number; tone?: "amber" | "teal" | "red"; sub?: string }) {
@@ -41,30 +41,46 @@ export function useOverview() {
   return { data, error, loading, reload: load };
 }
 
-const OWNER_TONE = { Vendor: "navy", Reviewer: "amber", "Technical retry": "slate", Complete: "slate" } as const;
-const OWNER_LABEL = { Vendor: "Waiting on vendor", Reviewer: "Needs reviewer", "Technical retry": "Technical retry", Complete: "Complete" } as const;
+type Tab = QueueTab | "ALL";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "NEEDS_REVIEW", label: "Needs review" },
+  { id: "WAITING_ON_VENDOR", label: "Waiting on vendor" },
+  { id: "APPROVED", label: "Approved" },
+  { id: "REJECTED", label: "Rejected" },
+  { id: "ALL", label: "All" },
+];
+const TAB_IDS = TABS.map((t) => t.id);
+
+function OwnerTag({ row }: { row: QueueRow }) {
+  if (row.status !== "PENDING") return <StatusBadge status={row.status} />;
+  return <Pill tone={row.owner === "VENDOR" ? "amber" : "navy"}>{row.owner_label}</Pill>;
+}
 
 export function AdminQueue() {
   const { data, error, loading, reload } = useOverview();
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
-  const status = (params.get("status") ?? "PENDING") as Status | "ALL";
+  const requested = params.get("tab") as Tab | null;
+  const tab: Tab = requested && TAB_IDS.includes(requested) ? requested : "NEEDS_REVIEW";
   const [search, setSearch] = useState("");
+  const setTab = (t: Tab) => setParams(t === "NEEDS_REVIEW" ? {} : { tab: t });
 
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
     return (data?.queue ?? []).filter(
-      (r) => (status === "ALL" || r.status === status) && (!q || `${r.application_id} ${r.business}`.toLowerCase().includes(q)),
+      (r) => (tab === "ALL" || r.tab === tab) && (!q || `${r.application_id} ${r.business} ${r.gstin}`.toLowerCase().includes(q)),
     );
-  }, [data, status, search]);
+  }, [data, tab, search]);
 
   const m = data?.metrics;
+  const count = (t: Tab) =>
+    !m ? null : t === "NEEDS_REVIEW" ? m.needs_review : t === "WAITING_ON_VENDOR" ? m.waiting_on_vendor : t === "APPROVED" ? m.approved : t === "REJECTED" ? m.rejected : m.total;
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight text-slate-900">Review queue</h1>
-          <p className="mt-0.5 text-[13px] text-slate-500">Exceptions first, oldest first. Open a case to see evidence and decide.</p>
+          <h1 className="text-xl font-semibold tracking-tight text-slate-900">Applications</h1>
+          <p className="mt-0.5 text-[13px] text-slate-500">Cases that need you come first, sorted by risk, then by how long they have waited.</p>
         </div>
         <Button variant="secondary" size="sm" icon={RefreshCw} onClick={reload} loading={loading && !!data}>Refresh</Button>
       </div>
@@ -72,64 +88,54 @@ export function AdminQueue() {
       {error ? <Alert tone="error" className="mt-4">{error}</Alert> : null}
 
       <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-5">
-        <Metric label="Needs review" value={m?.pending ?? "—"} tone="amber" />
+        <Metric label="Needs your review" value={m?.needs_review ?? "—"} tone="amber" />
+        <Metric label="Waiting on vendors" value={m?.waiting_on_vendor ?? "—"} />
         <Metric label="Approved" value={m?.approved ?? "—"} tone="teal" />
         <Metric label="Rejected" value={m?.rejected ?? "—"} tone="red" />
-        <Metric label="All applications" value={m?.total ?? "—"} />
-        <Metric
-          label="Mean automated check"
-          value={m?.mean_seconds != null ? `${m.mean_seconds.toFixed(2)} s` : "—"}
-          sub={m ? `Across ${m.run_count} saved runs` : undefined}
-        />
+        <Metric label="Oldest case waiting on you" value={m ? m.oldest_needs_review ?? "None" : "—"} />
       </div>
 
       <Card className="mt-5 overflow-hidden">
         <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 px-4 py-3">
-          <div className="flex rounded-lg bg-slate-100 p-0.5" role="tablist" aria-label="Filter by status">
-            {(["PENDING", "APPROVED", "REJECTED", "ALL"] as const).map((s) => (
+          <div className="hidden flex-wrap rounded-lg bg-slate-100 p-0.5 sm:flex" role="tablist" aria-label="Filter applications">
+            {TABS.map((t) => (
               <button
-                key={s}
+                key={t.id}
                 role="tab"
-                aria-selected={status === s}
-                onClick={() => setParams(s === "PENDING" ? {} : { status: s })}
-                className={cx("rounded-md px-3 py-1.5 text-[13px] font-medium", status === s ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900")}
+                aria-selected={tab === t.id}
+                onClick={() => setTab(t.id)}
+                className={cx("rounded-md px-3 py-1.5 text-[13px] font-medium", tab === t.id ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900")}
               >
-                {s === "PENDING" ? "Pending Review" : s === "ALL" ? "All" : s === "APPROVED" ? "Approved" : "Rejected"}
-                {m && s !== "ALL" ? (
-                  <span className="ml-1.5 text-xs text-slate-400 tabular">{s === "PENDING" ? m.pending : s === "APPROVED" ? m.approved : m.rejected}</span>
-                ) : null}
+                {t.label}
+                {count(t.id) != null ? <span className="ml-1.5 text-xs text-slate-400 tabular">{count(t.id)}</span> : null}
               </button>
             ))}
           </div>
+          <Select aria-label="Filter applications" className="w-auto sm:hidden" value={tab} onChange={(e) => setTab(e.target.value as Tab)}>
+            {TABS.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </Select>
           <div className="relative ml-auto w-full sm:w-72">
             <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-slate-400" aria-hidden />
-            <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search ID or business" className="pl-9" aria-label="Search applications" />
+            <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, ID or GSTIN" className="pl-9" aria-label="Search applications" />
           </div>
-          <Select aria-label="Status filter" className="w-auto sm:hidden" value={status} onChange={(e) => setParams(e.target.value === "PENDING" ? {} : { status: e.target.value })}>
-            <option value="PENDING">Pending Review</option>
-            <option value="APPROVED">Approved</option>
-            <option value="REJECTED">Rejected</option>
-            <option value="ALL">All</option>
-          </Select>
         </div>
 
         {loading && !data ? (
           <div className="p-8"><Spinner label="Loading applications…" /></div>
         ) : rows.length === 0 ? (
-          <EmptyState icon={Inbox} title={search ? "No matching applications" : status === "PENDING" ? "Queue is clear" : "No applications here yet"}>
-            {search ? "Try a different ID or business name." : status === "PENDING" ? "No applications are waiting for review." : "Applications appear here once vendors submit them."}
+          <EmptyState icon={Inbox} title={search ? "No matching applications" : tab === "NEEDS_REVIEW" ? "No cases need review" : "Nothing here yet"}>
+            {search ? "Try a different name, ID or GSTIN." : tab === "NEEDS_REVIEW" ? "Cases with our team appear here." : "Applications appear here once vendors submit them."}
           </EmptyState>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] text-left text-sm">
+            <table className="w-full min-w-[820px] text-left text-sm">
               <thead className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500">
                 <tr>
-                  <th scope="col" className="px-4 py-2.5">Application</th>
+                  <th scope="col" className="px-4 py-2.5">Vendor</th>
+                  <th scope="col" className="px-4 py-2.5">Why it's here</th>
+                  <th scope="col" className="px-4 py-2.5">Risk</th>
                   <th scope="col" className="px-4 py-2.5">Status</th>
-                  <th scope="col" className="px-4 py-2.5">Primary issue</th>
-                  <th scope="col" className="px-4 py-2.5">Next action</th>
-                  <th scope="col" className="px-4 py-2.5">Submitted</th>
-                  <th scope="col" className="px-4 py-2.5 text-right">Age</th>
+                  <th scope="col" className="px-4 py-2.5 text-right">Waiting</th>
                   <th scope="col" className="w-8"><span className="sr-only">Open</span></th>
                 </tr>
               </thead>
@@ -140,19 +146,12 @@ export function AdminQueue() {
                       <Link to={`/admin/cases/${r.application_id}`} className="font-medium text-slate-900 hover:text-navy-700" onClick={(e) => e.stopPropagation()}>
                         {r.business || "Unnamed business"}
                       </Link>
-                      <p className="font-mono text-xs text-slate-500">{r.application_id}</p>
+                      <p className="font-mono text-xs text-slate-500">{r.application_id}{r.gstin ? ` · ${r.gstin}` : ""}</p>
                     </td>
-                    <td className="px-4 py-3">
-                      <StatusBadge status={r.status} />
-                      {r.decision_source === "MANUAL" ? <p className="mt-1 text-xs text-slate-500">Reviewer decision</p> : null}
-                    </td>
-                    <td className="px-4 py-3 text-slate-700">{r.primary_issue === "—" ? <span className="text-slate-400">—</span> : r.primary_issue}</td>
-                    <td className="px-4 py-3"><Pill tone={OWNER_TONE[r.owner] ?? "slate"}>{OWNER_LABEL[r.owner] ?? r.owner}</Pill></td>
-                    <td className="px-4 py-3 text-[13px] text-slate-600">
-                      {formatDateTime(r.created_at)}
-                      {r.elapsed_ms != null ? <p className="text-xs text-slate-400">Check: {formatDuration(r.elapsed_ms)}</p> : null}
-                    </td>
-                    <td className="px-4 py-3 text-right text-[13px] text-slate-600 tabular">{r.age}</td>
+                    <td className="px-4 py-3 text-slate-700">{r.reason}</td>
+                    <td className="px-4 py-3"><RiskTag risk={r.risk} /></td>
+                    <td className="px-4 py-3"><OwnerTag row={r} /></td>
+                    <td className="px-4 py-3 text-right text-[13px] text-slate-600 tabular" title={formatDateTime(r.waiting_since)}>{r.age}</td>
                     <td className="pr-3"><ChevronRight className="size-4 text-slate-400" aria-hidden /></td>
                   </tr>
                 ))}
@@ -162,7 +161,7 @@ export function AdminQueue() {
         )}
       </Card>
       <p className="mt-3 text-xs text-slate-500">
-        Figures come from saved records. Mean check time is automated processing only, not total vendor waiting time.
+        Synthetic test data. Figures come from saved records; applications that were never submitted are not counted.
       </p>
     </div>
   );

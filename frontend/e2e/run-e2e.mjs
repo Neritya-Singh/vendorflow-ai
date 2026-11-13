@@ -61,8 +61,15 @@ async function apply(page, base, data, gstPath, bankPath, label) {
   await page.getByRole("checkbox").check();
   await submit.click();
   await page.getByRole("heading", { name: "Your result" }).waitFor({ timeout: 90_000 });
-  const decision = (await page.locator("h2").filter({ hasText: /^(Approved|Pending Review|Rejected)$/ }).first().textContent()).trim();
+  const decision = await outcome(page);
   return { id, code, decision };
+}
+
+/** "STATUS/OWNER" from the vendor decision card, e.g. "PENDING/TEAM". */
+async function outcome(page) {
+  const card = page.locator("[data-status]").first();
+  await card.waitFor();
+  return `${await card.getAttribute("data-status")}/${await card.getAttribute("data-owner")}`;
 }
 
 async function track(page, base, id, code) {
@@ -86,8 +93,8 @@ try {
   await shot(page, "01-home");
   const happy = fixture("frontend_happy");
   const A = await apply(page, BASE, happy, pdf("frontend_happy", "gst"), pdf("frontend_happy", "bank"), "happy");
-  check("A happy path → Approved", A.decision === "Approved", A.decision);
-  const stagesDone = await page.locator('ol[aria-label="Workflow stages"] > li').filter({ hasText: "Completed ·" }).count();
+  check("A happy path → Approved", A.decision === "APPROVED/COMPLETE", A.decision);
+  const stagesDone = await page.locator('ol[aria-label="Workflow stages"] > li').filter({ hasText: "Done ·" }).count();
   check("A receipt shows 9 completed server-timed stages", stagesDone === 9, `${stagesDone}`);
   await shot(page, "05-receipt-approved");
   const storage = await page.evaluate(() => JSON.stringify(localStorage) + JSON.stringify(sessionStorage));
@@ -96,18 +103,26 @@ try {
   // ------------------------------------------------------------ B. bank-holder mismatch loop
   const ec2 = fixture("ec2_bank_owner");
   const B = await apply(page, BASE, ec2, pdf("ec2_bank_owner", "gst"), pdf("ec2_bank_owner", "bank"), "ec2");
-  check("B bank-holder mismatch → Pending Review", B.decision === "Pending Review", B.decision);
-  check("B no raw rule codes shown to vendor", !(await page.locator("main").textContent()).match(/\bR1[0-4]\b|EXTRACTION_INCOMPLETE/));
+  check("B bank-holder mismatch → Pending, with our team", B.decision === "PENDING/TEAM", B.decision);
+  const bText = await page.locator("main").textContent();
+  check("B no raw rule codes shown to vendor", !bText.match(/\bR1[0-4]\b|EXTRACTION_INCOMPLETE/));
+  check("B vendor told no action is needed", bText.includes("No action is needed from you"));
+  check("B vendor copy avoids fraud/duplicate/failed wording", !/fraud|duplicate|suspicious|failed/i.test(bText));
   await shot(page, "06-receipt-pending");
+  await track(page, BASE, B.id, B.code);
+  await page.getByText("With our team — no action needed").waitFor();
+  check("B with-our-team case shows no edit form", (await page.getByRole("button", { name: "Re-check" }).count()) === 0);
 
   const admin = await browser.newContext({ viewport: { width: 1440, height: 950 } });
   const ap = await admin.newPage();
   await ap.goto(`${BASE}/admin`);
   await ap.getByLabel("Admin password").fill(PASSWORD);
   await ap.getByRole("button", { name: "Sign in" }).click();
-  await ap.getByRole("heading", { name: "Review queue" }).waitFor();
+  await ap.getByRole("heading", { name: "Applications" }).waitFor();
   await shot(ap, "07-admin-queue");
-  check("B admin queue lists the pending case first", (await ap.locator("tbody tr").first().textContent()).includes(B.id));
+  const firstRow = await ap.locator("tbody tr").first().textContent();
+  check("B 'Needs review' tab lists the team case with reason and risk", firstRow.includes(B.id)
+    && firstRow.includes("Bank account holder differs from legal name") && firstRow.includes("Medium"), firstRow);
   await ap.getByRole("link", { name: ec2.legal_name }).first().click();
   await ap.getByRole("heading", { name: "Submitted vs. PDF evidence" }).waitFor();
   const masked = await ap.locator("table").first().textContent();
@@ -131,15 +146,15 @@ try {
   await shot(page, "10-track-correction-requested");
   await page.getByLabel("Account holder name").fill(ec2.legal_name);
   await page.locator('input[type="file"]').nth(1).setInputFiles(pdf("happy", "bank"));
-  await page.getByRole("button", { name: "Resubmit for checking" }).click();
+  await page.getByRole("button", { name: "Re-check" }).click();
   await page.getByText("Your update was checked and saved").waitFor({ timeout: 90_000 });
   const afterB = await page.locator("main").textContent();
-  check("B corrected application re-run → Approved", /Decision\s*Approved/.test(afterB));
+  check("B corrected application re-run → Approved", (await outcome(page)) === "APPROVED/COMPLETE");
   check("B history shows BANK v2 with original GST v1 kept", afterB.includes("Bank proof v2") && afterB.includes("GST certificate v1"));
   await shot(page, "11-track-after-correction");
 
   // ------------------------------------------------------------ terminal immutability
-  check("H terminal application shows no correction form", (await page.getByRole("button", { name: "Resubmit for checking" }).count()) === 0);
+  check("H terminal application shows no correction form", (await page.getByRole("button", { name: "Re-check" }).count()) === 0);
   const resubmitStatus = await page.evaluate(async ([id, code]) => {
     const f = new FormData();
     Object.entries({ application_id: id, tracking_code: code, expected_revision: "3", expected_latest_run_id: "RUN-000000000000", legal_name: "X", contact_email: "a@b.co" })
@@ -152,24 +167,24 @@ try {
   const acme = fixture("happy");
   const C = await apply(page, BASE, acme, pdf("happy", "bank"), pdf("happy", "gst"), "swapped");
   const cText = await page.locator("main").textContent();
-  check("C swapped PDFs → Pending Review", C.decision === "Pending Review", C.decision);
-  check("C vendor told PDFs are in the wrong fields", cText.includes("wrong upload fields"));
+  check("C swapped PDFs → Pending, waiting on vendor", C.decision === "PENDING/VENDOR", C.decision);
+  check("C vendor told the files look swapped", cText.includes("Your files look swapped"));
   await shot(page, "12-receipt-swapped");
 
   // ------------------------------------------------------------ D. unreadable bank PDF
   const D = await apply(page, BASE, fixture("frontend_ec2_review"), pdf("frontend_ec2_review", "gst"), UNREADABLE, "unreadable");
   const dText = await page.locator("main").textContent();
-  check("D unreadable bank PDF → Pending Review", D.decision === "Pending Review", D.decision);
+  check("D unreadable bank PDF → Pending, waiting on vendor", D.decision === "PENDING/VENDOR", D.decision);
   check("D vendor told to replace the bank document", dText.includes("couldn't read your bank document"));
 
   // ------------------------------------------------------------ E. Gemini provider failure (real client, no key)
   const outagePage = await ctx.newPage();
   const E = await apply(outagePage, OUTAGE, fixture("frontend_ec2_review"), pdf("frontend_ec2_review", "gst"), pdf("frontend_ec2_review", "bank"), "outage");
   const eText = await outagePage.locator("main").textContent();
-  check("E Gemini failure → Pending Review (never approved)", E.decision === "Pending Review", E.decision);
-  check("E truthful 'temporarily unavailable' message", eText.includes("Document processing temporarily unavailable"));
-  check("E does not claim the PDFs are unreadable", !/couldn't read|unreadable/i.test(eText));
-  check("E stage S3 shown as Failed", (await outagePage.getByText("Failed ·").count()) >= 1);
+  check("E Gemini failure → Pending, with our team (never approved)", E.decision === "PENDING/TEAM", E.decision);
+  check("E truthful 'temporary problem on our side' message", eText.includes("temporary problem on our side"));
+  check("E does not blame the documents", !/unreadable|clearer copy/i.test(eText));
+  check("E reading stage shown as couldn't finish", (await outagePage.getByText("Couldn't finish ·").count()) >= 1);
   await shot(outagePage, "13-receipt-gemini-unavailable");
   await track(outagePage, OUTAGE, E.id, E.code);
   await outagePage.getByRole("button", { name: "Retry check now" }).waitFor();
@@ -194,7 +209,10 @@ try {
 
   // ------------------------------------------------------------ admin: PDF, approve, history
   await ap.goto(`${BASE}/admin`);
-  await ap.getByRole("heading", { name: "Review queue" }).waitFor();
+  await ap.getByRole("heading", { name: "Applications" }).waitFor();
+  await ap.getByRole("tab", { name: /Waiting on vendor/ }).click();
+  const waiting = await ap.locator("tbody").textContent();
+  check("'Waiting on vendor' tab lists the swapped-files case", waiting.includes(C.id) && waiting.includes("files look swapped"), waiting.slice(0, 200));
   const pdfStatus = await ap.evaluate(async (id) => {
     const c = await (await fetch(`/api/admin/applications/${id}`)).json();
     const run = c.runs[0];
@@ -218,7 +236,7 @@ try {
   check("Mobile apply has no horizontal overflow", await noHorizontalOverflow(mp));
   await shot(mp, "17-mobile-apply");
   await track(mp, BASE, C.id, C.code);
-  await mp.getByText("Correct and resubmit").waitFor();
+  await mp.getByText("Fix the items above").waitFor();
   check("Mobile tracking has no horizontal overflow", await noHorizontalOverflow(mp));
   await shot(mp, "18-mobile-track");
   await mobile.close();

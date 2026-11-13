@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { PageHeader } from "../components/AppShell";
 import { FilePicker } from "../components/FilePicker";
-import { CredentialsCard, DecisionCard, SavedStages, ScopeNote, VendorChecks } from "../components/Outcome";
+import { CredentialsCard, DecisionCard, SavedStages, ScopeNote } from "../components/Outcome";
 import { ProcessingPanel } from "../components/ProcessingPanel";
 import { BankSection, BusinessSection, missingDetails, type FieldErrors } from "../components/VendorFormSections";
 import { Alert, Button, Card, KeyValue, Spinner, cx } from "../components/ui";
@@ -139,10 +139,7 @@ export function ApplyPage() {
         <div className="mt-6 grid gap-5">
           <DecisionCard view={view} />
           <CredentialsCard creds={creds} mode="receipt" />
-          <div className="grid items-start gap-5 lg:grid-cols-2">
-            <VendorChecks checks={view.checks} />
-            <SavedStages view={view} />
-          </div>
+          <SavedStages view={view} />
           <ScopeNote />
           <div className="flex flex-wrap gap-3">
             <Button
@@ -153,7 +150,7 @@ export function ApplyPage() {
                 navigate("/track");
               }}
             >
-              {view.processing_unavailable ? "Retry the document check" : view.editable ? "Track and correct this application" : "Track this application"}
+              {view.editable ? "Fix items" : "Open my application"}
             </Button>
             <Button size="lg" variant="secondary" icon={Plus} onClick={startAnother}>
               Start another application
@@ -286,7 +283,7 @@ export function ApplyPage() {
                     {[missing.length ? `Not entered: ${missing.join(", ")}.` : "", missingDocs.length ? `Not attached: ${missingDocs.join(" and ")}.` : ""]
                       .filter(Boolean)
                       .join(" ")}{" "}
-                    You can still submit, but the application will go to Pending Review until it's completed.
+                    You can still submit, and we'll tell you exactly what's still needed.
                   </Alert>
                 ) : null}
 

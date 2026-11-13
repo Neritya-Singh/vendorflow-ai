@@ -65,7 +65,7 @@ export function ProcessingPanel({ run, title, onRetry, onCheckStatus }: {
         </div>
       </div>
       <div className="px-5 py-5">
-        <StageList rows={run.stages} liveStartedAt={run.liveStartedAt} />
+        <StageList rows={run.stages} liveStartedAt={run.liveStartedAt} audience="vendor" />
       </div>
       {run.phase === "interrupted" ? (
         <div className="border-t border-slate-200 px-5 py-4">
@@ -95,7 +95,7 @@ export function ProcessingPanel({ run, title, onRetry, onCheckStatus }: {
       ) : null}
       <p className="flex items-center gap-1.5 border-t border-slate-100 bg-slate-50 px-5 py-2.5 text-xs text-slate-500">
         <Radio className="size-3.5" aria-hidden />
-        Live: the server streams each stage event as the Python workflow emits it; timings are measured server-side.
+        Each step updates only when it actually finishes on our side.
       </p>
     </Card>
   );

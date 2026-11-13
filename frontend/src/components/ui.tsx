@@ -7,7 +7,7 @@ import {
   forwardRef, useId, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode,
   type SelectHTMLAttributes, type TextareaHTMLAttributes,
 } from "react";
-import type { CheckState, Status } from "../lib/types";
+import type { CheckState, Risk, Status } from "../lib/types";
 
 /** clsx + tailwind-merge: a later class reliably overrides a conflicting default. */
 export const cx = (...inputs: ClassValue[]) => twMerge(clsx(inputs));
@@ -102,6 +102,18 @@ export function StatusBadge({ status, className }: { status: Status; className?:
     <span className={cx("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset", style.badge, className)}>
       <Icon className="size-3.5" aria-hidden />
       {style.label}
+    </span>
+  );
+}
+
+/** Reviewer-only risk tag: colour dot plus text. */
+export function RiskTag({ risk }: { risk: Risk }) {
+  if (!risk) return <span className="text-slate-400">—</span>;
+  const style = { HIGH: ["bg-red-600", "High"], MEDIUM: ["bg-amber-500", "Medium"], LOW: ["bg-slate-400", "Low"] }[risk];
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-slate-800">
+      <span aria-hidden className={cx("size-2 rounded-full", style[0])} />
+      {style[1]}
     </span>
   );
 }

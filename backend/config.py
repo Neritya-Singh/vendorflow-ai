@@ -28,6 +28,7 @@ class Settings:
     cookie_secure: bool = True
     session_hours: int = 8
     frontend_dist: Path = ROOT / "frontend" / "dist"
+    workspace_name: str = "Zamp AI"  # buyer shown to vendors (demo workspace)
 
     @property
     def gemini_configured(self) -> bool:
@@ -67,4 +68,5 @@ def load_settings(*, env_file: bool = True) -> Settings:
         session_key=key,
         cookie_secure=_flag("COOKIE_SECURE", True),
         session_hours=int(os.getenv("ADMIN_SESSION_HOURS", "8")),
+        workspace_name=(os.getenv("WORKSPACE_NAME", "").strip() or "Zamp AI")[:80],
     )

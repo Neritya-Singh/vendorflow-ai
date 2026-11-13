@@ -5,7 +5,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { StageList } from "../../components/StageList";
-import { Alert, Button, Card, CardHeader, CheckIcon, KeyValue, Pill, Spinner, StatusBadge, Textarea, cx } from "../../components/ui";
+import { Alert, Button, Card, CardHeader, CheckIcon, KeyValue, Pill, RiskTag, Spinner, StatusBadge, Textarea, cx } from "../../components/ui";
 import { ApiError, api } from "../../lib/api";
 import { formatDateTime, formatDuration } from "../../lib/format";
 import type { AdminCase as Case, ComparisonRow, RunDetail } from "../../lib/types";
@@ -13,7 +13,7 @@ import { useAdmin } from "./AdminLayout";
 
 type Action = "REQUEST_CORRECTION" | "APPROVE" | "REJECT";
 const ACTIONS: { id: Action; label: string; verb: string; icon: typeof Gavel; tone: string; help: string }[] = [
-  { id: "REQUEST_CORRECTION", label: "Request correction", verb: "Send correction request", icon: MessageSquareWarning, tone: "amber", help: "Vendor fixes details or PDFs; stays Pending Review." },
+  { id: "REQUEST_CORRECTION", label: "Request correction", verb: "Send correction request", icon: MessageSquareWarning, tone: "amber", help: "Vendor gets a message and the case moves to Waiting on vendor." },
   { id: "APPROVE", label: "Approve", verb: "Approve application", icon: CheckCircle2, tone: "teal", help: "Final. Records a manual approval." },
   { id: "REJECT", label: "Reject", verb: "Reject application", icon: XCircle, tone: "red", help: "Final. The vendor sees your reason." },
 ];
@@ -368,6 +368,8 @@ export function AdminCase() {
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[13px] text-slate-500">
             <span className="font-mono text-slate-700">{c.application_id}</span>
             <StatusBadge status={c.status} />
+            {c.status === "PENDING" ? <Pill tone={c.owner === "VENDOR" ? "amber" : "navy"}>{c.owner_label}</Pill> : null}
+            {c.risk && c.status === "PENDING" ? <RiskTag risk={c.risk} /> : null}
             {c.decision_source === "MANUAL" ? <Pill>Reviewer decision</Pill> : <Pill>Automated decision</Pill>}
             <span>Revision {c.revision}</span>
             <span>· Submitted {formatDateTime(c.created_at)}</span>
@@ -379,11 +381,28 @@ export function AdminCase() {
 
       <Card className={cx("mt-4 px-5 py-4", c.status === "PENDING" ? "border-amber-200 bg-amber-50/50" : c.status === "APPROVED" ? "border-teal-200 bg-teal-50/50" : "border-red-200 bg-red-50/50")}>
         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-          {c.status === "PENDING" ? `Primary issue: ${c.primary_issue}` : "Decision basis"}
+          {c.status === "PENDING" ? "Why it's here" : "Decision basis"}
         </p>
-        <ul className="mt-1.5 space-y-1 text-sm text-slate-800">
-          {c.reasons.map((r) => <li key={r}>{r}</li>)}
-        </ul>
+        {c.status === "PENDING" ? (
+          <>
+            <p className="mt-1 text-[15px] font-semibold text-slate-900">{c.primary_issue}</p>
+            {c.flags.length > 1 ? (
+              <ul className="mt-1.5 space-y-0.5 text-[13px] text-slate-700">
+                {c.flags.slice(1).map((f) => <li key={f.rule_id}>Also: {f.reason}</li>)}
+              </ul>
+            ) : null}
+            {c.owner === "VENDOR" && c.vendor_items.length ? (
+              <div className="mt-2 text-[13px] text-slate-700">
+                <p className="font-medium text-slate-800">The vendor was asked to:</p>
+                <ul className="mt-0.5 list-disc pl-5">{c.vendor_items.map((i) => <li key={i.text}>{i.text}</li>)}</ul>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <ul className="mt-1.5 space-y-1 text-sm text-slate-800">
+            {c.reasons.map((r) => <li key={r}>{r}</li>)}
+          </ul>
+        )}
         {c.active_correction_request ? <p className="mt-2 text-[13px] font-medium text-navy-800">Correction requested — waiting for the vendor to resubmit.</p> : null}
       </Card>
 

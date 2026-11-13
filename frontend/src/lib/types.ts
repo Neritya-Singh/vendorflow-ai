@@ -1,7 +1,10 @@
 export type Status = "APPROVED" | "PENDING" | "REJECTED";
 export type CheckState = "PASS" | "FAIL" | "UNKNOWN";
 export type StageState = "NOT_RUN" | "STARTED" | "COMPLETED" | "FAILED" | "SKIPPED";
-export type Owner = "Vendor" | "Reviewer" | "Technical retry" | "Complete";
+/** Who acts next on a case (V2_02 §6). Never a fourth decision status. */
+export type Owner = "DRAFT" | "VENDOR" | "TEAM" | "COMPLETE";
+export type Risk = "HIGH" | "MEDIUM" | "LOW" | null;
+export type QueueTab = "NEEDS_REVIEW" | "WAITING_ON_VENDOR" | "APPROVED" | "REJECTED";
 
 export interface VendorFields {
   legal_name: string;
@@ -66,10 +69,9 @@ export interface StageEvent {
   note: string;
 }
 
-export interface VendorCheck {
-  label: string;
-  state: CheckState;
-  detail: string;
+export interface TodoItem {
+  key: string;
+  text: string;
 }
 
 export interface TimelineItem {
@@ -97,11 +99,12 @@ export interface VendorView {
   decision_source: "AUTOMATED" | "MANUAL";
   owner: Owner;
   processing_unavailable: boolean;
+  retry_available: boolean;
   heading: string;
   next_step: string;
   reasons: string[];
+  todo: TodoItem[];
   reviewer_note: ReviewerNote | null;
-  checks: VendorCheck[];
   stages: StageRow[];
   elapsed_ms: number | null;
   timeline: TimelineItem[];
@@ -127,16 +130,20 @@ export type StreamMessage =
 export interface QueueRow {
   application_id: string;
   business: string;
+  gstin: string;
   status: Status;
   status_label: string;
   decision_source: string;
   owner: Owner;
-  primary_issue: string;
+  owner_label: string;
+  tab: QueueTab;
+  reason: string;
+  risk: Risk;
   age: string;
   created_at: string | null;
   updated_at: string | null;
+  waiting_since: string | null;
   elapsed_ms: number | null;
-  has_run: boolean;
 }
 
 export interface ReviewRecord {
@@ -156,6 +163,9 @@ export interface Overview {
     approved: number;
     pending: number;
     rejected: number;
+    needs_review: number;
+    waiting_on_vendor: number;
+    oldest_needs_review: string | null;
     run_count: number;
     mean_seconds: number | null;
   };
@@ -207,7 +217,11 @@ export interface AdminCase {
   contact: { name: string; email: string; state: string };
   reasons: string[];
   owner: Owner;
+  owner_label: string;
   primary_issue: string;
+  risk: Risk;
+  flags: { rule_id: string; risk: Exclude<Risk, null>; reason: string }[];
+  vendor_items: { short: string; text: string }[];
   issues: { failed: Issue[]; unverified: Issue[] };
   comparison: ComparisonRow[];
   checks: { rule_id: string; label: string; state: CheckState; evidence: string }[];

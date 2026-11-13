@@ -11,13 +11,12 @@ from datetime import datetime
 from typing import Any
 
 from vendorflow.models import WorkflowResult
+from vendorflow import v2_policy as v2
 from vendorflow.ui_support import (
-    comparison_assessments, completed_counts, display_status, selected_reasons,
-    vendor_document_guidance, vendor_safe_review_reason, vendor_visible_checks,
+    comparison_assessments, completed_counts, display_status, selected_reasons, vendor_safe_review_reason,
 )
 from vendorflow.ux_support import (
-    active_review_request, admin_queue_rows, admin_review_issue_groups, committed_pdf_types,
-    next_action_owner, primary_review_issue, vendor_action_heading, vendor_next_step,
+    active_review_request, admin_review_issue_groups, age_label, committed_pdf_types,
 )
 
 STAGES = [
@@ -26,14 +25,8 @@ STAGES = [
     ("S7", "Decision routing"), ("S8", "Explanation"), ("S9", "Persistence"),
 ]
 
-PROCESSING_UNAVAILABLE = ("Document processing was temporarily unavailable, so your PDFs have not been "
-                          "checked yet. This is not a problem with your documents. Retry the check — "
-                          "your application ID stays the same.")
-EVIDENCE_UNCONFIRMED = ("We couldn't confirm all the details from the uploaded PDFs. Check that your "
-                        "documents are complete and readable, then replace any unclear file.")
 REVIEW_ACTION_LABELS = {"APPROVE": "Approved by reviewer", "REJECT": "Rejected by reviewer",
                         "REQUEST_CORRECTION": "Reviewer requested a correction"}
-INPUT_RULES = {"R01", "R03", "R04", "R05", "R06", "R07"}
 
 
 def _iso(value: Any) -> str | None:
@@ -82,69 +75,79 @@ def stage_summary(events: list[dict]) -> list[dict]:
     return rows
 
 
-def _vendor_checks(run: dict, owner: str) -> list[dict]:
-    document = vendor_document_guidance(run)
-    outage = owner == "Technical retry"
-    rows = []
-    for check in vendor_visible_checks(run.get("checks_json") or []):
-        state, rule = check.get("state", "UNKNOWN"), check.get("rule_id")
-        if document and ((rule in {"R08", "R09", "R10", "R11"} and state == "UNKNOWN")
-                         or (rule in {"R13", "R14"} and state != "PASS")):
-            continue  # Secondary effects of a missing/unreadable PDF are not repeated.
-        if outage and rule in {"R08", "R09", "R10", "R11", "R13"} and state != "PASS":
-            detail, state = "Not checked yet — document processing was unavailable.", "UNKNOWN"
-        elif state == "PASS":
-            detail = "Passed"
-        elif document and rule == "R02":
-            detail = document[0]
-        elif rule == "R13":
-            detail = EVIDENCE_UNCONFIRMED
-        elif rule == "R14" and outage:
-            detail = PROCESSING_UNAVAILABLE
-        else:
-            detail = check.get("vendor_message") or "Requires review"
-        rows.append({"label": check.get("label") or "Check", "state": state, "detail": detail})
-    return rows
+VENDOR_REVIEW_LABELS = {"APPROVE": "Approved by our team", "REJECT": "Not approved by our team",
+                        "REQUEST_CORRECTION": "Our team asked for a change"}
 
 
-def vendor_view(record: dict, runs: list[dict], reviews: list[dict]) -> dict:
+# Vendor wording for the same nine real stages (V2_02 §5): no internal captions.
+VENDOR_STAGES = {
+    "S1": "Received", "S2": "Opened your documents", "S3": "Read the details", "S4": "Prepared the details",
+    "S5": "Checked formats and compared documents", "S6": "Checked our records", "S7": "Decided",
+    "S8": "Prepared your result", "S9": "Saved",
+}
+
+
+def vendor_stage_rows(events: list[dict]) -> list[dict]:
+    """Stage rows for vendor screens: real states and timings, but no internal notes."""
+    return [{**row, "label": VENDOR_STAGES[row["stage_id"]], "note": ""} for row in stage_summary(events)]
+
+
+def vendor_view(record: dict, runs: list[dict], reviews: list[dict], *, buyer: str = "Zamp AI") -> dict:
+    """Vendor-safe status: who acts next and exactly what is needed (V2_02 §6–9).
+
+    Never includes rule IDs, check states, identity-screening results, other case
+    IDs or internal stage notes.
+    """
     status = str(record.get("current_status") or "PENDING")
     latest_run = runs[0] if runs else None
     latest_review = reviews[0] if reviews else None
-    owner = next_action_owner(record, latest_run, latest_review)
-    reasons = selected_reasons(record, runs, reviews, audience="vendor")
-    if owner == "Technical retry" and record.get("decision_source") != "MANUAL":
-        independent = [c.get("vendor_message") for c in (latest_run or {}).get("checks_json") or []
-                       if c.get("rule_id") in INPUT_RULES and c.get("state") == "FAIL"]
-        reasons = [PROCESSING_UNAVAILABLE, *[m for m in independent if m]][:3]
+    owner = v2.case_owner(record, latest_run, latest_review)
+    correction = active_review_request(latest_review, latest_run)
+    review_reason = vendor_safe_review_reason(str((latest_review or {}).get("reason") or ""))
+    todo: list[dict] = []
+    retry_available = False
+
     if status == "APPROVED":
-        heading = "Application approved"
-        detail = ("Your details match your documents under our onboarding checks. "
-                  "No further action is required — keep your receipt for reference.")
+        status_label, heading = "Approved", "You're approved"
+        messages = [f"Your business is approved as a supplier to {buyer}."]
+        next_step = "Nothing else is needed from you. Keep your application ID for reference."
     elif status == "REJECTED":
-        heading = "Application not approved"
-        detail = ("A reviewer has made a final decision. Read the reason above. "
-                  "Contact the review team if you need help; this application can no longer be changed.")
+        status_label, heading = "Not approved", "Not approved"
+        messages = [f"We couldn't approve your application: {review_reason}" if review_reason
+                    else "We couldn't approve your application."]
+        next_step = f"This decision is final. If you have questions, contact {buyer}'s finance team."
+    elif owner == v2.DRAFT:
+        status_label, heading = v2.VENDOR_STATUS_LABELS[owner], "Continue your application"
+        messages = ["Your application was started but not checked yet."]
+        next_step = "Upload your documents again and submit them for checking. Your application ID stays the same."
+    elif owner == v2.VENDOR:
+        status_label = heading = v2.VENDOR_STATUS_LABELS[owner]
+        if correction:
+            todo.append({"key": "correction", "text": f"Our team needs one change: {review_reason}"})
+        todo.extend({"key": i["key"], "text": i["text"]} for i in v2.vendor_items(latest_run))
+        count = len(todo)
+        messages = [f"We need {'one thing' if count == 1 else f'{count} things'} before we can continue."]
+        next_step = "Fix the items listed, then submit for checking again. Your application ID stays the same."
     else:
-        heading = vendor_action_heading(record, latest_run, latest_review)
-        heading = heading.replace("Next step: ", "")
-        detail = vendor_next_step(record, latest_run, latest_review)
-        if owner == "Technical retry":
-            heading = "Retry the document check"
-            detail = ("Document processing is temporarily unavailable. Retry the check from your tracking page without "
-                      "changing anything; your application ID and tracking code stay the same.")
+        status_label = v2.VENDOR_STATUS_LABELS[v2.TEAM]
+        heading = "With our team — no action needed"
+        messages = [v2.vendor_team_message(latest_run)]
+        next_step = "We'll message you here when there's an update."
+        if v2.extraction_outage(latest_run):
+            retry_available = True
+            next_step = ("Our team will look at it. You can also try the check again now — "
+                         "nothing needs to change and your application ID stays the same.")
 
     reviewer_note = None
-    # A final reviewer decision always shows; a correction request only while it is
-    # still active (a newer automated run supersedes it).
+    # A final reviewer decision always shows; a correction request only while active.
     if latest_review and (
         (latest_review.get("action") != "REQUEST_CORRECTION" and record.get("decision_source") == "MANUAL")
-        or active_review_request(latest_review, latest_run)
+        or correction
     ):
         reviewer_note = {
             "action": latest_review.get("action"),
-            "title": REVIEW_ACTION_LABELS.get(str(latest_review.get("action")), "Reviewer note"),
-            "message": vendor_safe_review_reason(str(latest_review.get("reason") or "")),
+            "title": VENDOR_REVIEW_LABELS.get(str(latest_review.get("action")), "Message from our team"),
+            "message": review_reason,
             "at": _iso(latest_review.get("created_at")),
         }
 
@@ -152,7 +155,7 @@ def vendor_view(record: dict, runs: list[dict], reviews: list[dict]) -> dict:
     for run in runs:
         timeline.append({
             "kind": "run", "at": _iso(run.get("created_at") or run.get("finished_at")),
-            "title": "Initial check" if run.get("trigger") == "submission" else "Re-check after correction",
+            "title": "Checked your application" if run.get("trigger") == "submission" else "Checked your changes",
             "status": run.get("status"), "status_label": display_status(str(run.get("status") or "")),
             "elapsed_ms": run.get("elapsed_ms"),
             "documents": [{"doc_type": d.get("doc_type"), "version": d.get("version")}
@@ -161,7 +164,7 @@ def vendor_view(record: dict, runs: list[dict], reviews: list[dict]) -> dict:
     for review in reviews:
         timeline.append({
             "kind": "review", "at": _iso(review.get("created_at")),
-            "title": REVIEW_ACTION_LABELS.get(str(review.get("action")), "Reviewer action"),
+            "title": VENDOR_REVIEW_LABELS.get(str(review.get("action")), "Message from our team"),
             "status": {"APPROVE": "APPROVED", "REJECT": "REJECTED"}.get(str(review.get("action")), "PENDING"),
             "message": vendor_safe_review_reason(str(review.get("reason") or "")),
         })
@@ -169,19 +172,19 @@ def vendor_view(record: dict, runs: list[dict], reviews: list[dict]) -> dict:
 
     return {
         "application_id": record.get("id"),
-        "status": status, "status_label": display_status(status),
+        "status": status, "status_label": status_label,
         "decision_source": record.get("decision_source") or "AUTOMATED",
-        "owner": owner, "processing_unavailable": owner == "Technical retry",
-        "heading": heading, "next_step": detail, "reasons": reasons[:3],
+        "owner": owner, "processing_unavailable": retry_available, "retry_available": retry_available,
+        "heading": heading, "next_step": next_step, "reasons": messages, "todo": todo,
         "reviewer_note": reviewer_note,
-        "checks": _vendor_checks(latest_run, owner) if latest_run else [],
-        "stages": stage_summary((latest_run or {}).get("stages_json") or []),
+        "stages": vendor_stage_rows((latest_run or {}).get("stages_json") or []),
         "elapsed_ms": (latest_run or {}).get("elapsed_ms"),
         "timeline": timeline,
         "documents": [{"doc_type": d.get("doc_type"), "version": d.get("version")}
                       for d in (latest_run or {}).get("document_manifest") or []],
-        "editable": status == "PENDING" and bool(latest_run),
-        "needs_resume": status == "PENDING" and not latest_run,
+        # Only the vendor's own to-do opens the edit form; "with our team" never does.
+        "editable": status == "PENDING" and owner == v2.VENDOR,
+        "needs_resume": status == "PENDING" and owner == v2.DRAFT,
         "revision": int(record.get("revision") or 0),
         "latest_run_id": record.get("latest_run_id"),
         "submitted": record.get("payload_json") or {},
@@ -189,11 +192,12 @@ def vendor_view(record: dict, runs: list[dict], reviews: list[dict]) -> dict:
     }
 
 
-def receipt_view(application_id: str, result: WorkflowResult, vendor: dict, manifest: list[dict]) -> dict:
+def receipt_view(application_id: str, result: WorkflowResult, vendor: dict, manifest: list[dict],
+                 *, buyer: str = "Zamp AI") -> dict:
     record = {"id": application_id, "current_status": result.status.value,
               "decision_source": "AUTOMATED", "payload_json": vendor,
               "latest_run_id": result.run_id, "revision": None}
-    view = vendor_view(record, [result_as_run(result, manifest)], [])
+    view = vendor_view(record, [result_as_run(result, manifest)], [], buyer=buyer)
     view["persisted"] = result.persisted
     view.pop("revision")
     return view
@@ -207,27 +211,53 @@ def _review_dict(row: dict) -> dict:
             "reviewed_run_id": row.get("reviewed_run_id"), "created_at": _iso(row.get("created_at"))}
 
 
-def admin_overview(apps: list[dict], run_rows: list[dict], review_rows: list[dict]) -> dict:
-    latest_runs = {r["id"]: r for r in run_rows if r.get("id")}
-    latest_reviews: dict[str, dict] = {}
+TAB_ORDER = {"NEEDS_REVIEW": 0, "WAITING_ON_VENDOR": 1, "APPROVED": 2, "REJECTED": 3}
+
+
+def _latest_reviews(review_rows: list[dict]) -> dict[str, dict]:
+    latest: dict[str, dict] = {}
     for row in sorted(review_rows, key=lambda r: str(r.get("created_at") or ""), reverse=True):
-        latest_reviews.setdefault(row.get("application_id"), row)
-    ordered = sorted(apps, key=lambda a: (a.get("current_status") != "PENDING", str(a.get("created_at") or "")))
-    rows = admin_queue_rows(ordered, latest_runs, latest_reviews)
+        latest.setdefault(row.get("application_id"), row)
+    return latest
+
+
+def admin_overview(apps: list[dict], run_rows: list[dict], review_rows: list[dict]) -> dict:
+    """Reviewer queue with ownership tabs. Drafts (zero runs) are excluded from the
+    queue and from every metric."""
+    latest_runs = {r["id"]: r for r in run_rows if r.get("id")}
+    latest_reviews = _latest_reviews(review_rows)
     queue = []
-    for app, row in zip(ordered, rows):
+    submitted = []
+    for app in apps:
         run = latest_runs.get(str(app.get("latest_run_id") or ""))
+        summary = v2.staff_summary(app, run, latest_reviews.get(app.get("id")))
+        tab = v2.queue_tab(app, summary["owner"])
+        if tab is None:
+            continue
+        submitted.append(app)
+        waiting_since = app.get("updated_at") or app.get("created_at")
         queue.append({
-            "application_id": row["Application ID"], "business": row["Business"],
-            "status": app.get("current_status"), "status_label": row["Status"],
+            "application_id": app.get("id"),
+            "business": str((app.get("payload_json") or {}).get("legal_name") or ""),
+            "gstin": str(app.get("gstin_normalized") or (app.get("payload_json") or {}).get("gstin") or ""),
+            "status": app.get("current_status"), "status_label": display_status(str(app.get("current_status") or "")),
             "decision_source": app.get("decision_source"),
-            "owner": row["Action owner"], "primary_issue": row["Primary issue"], "age": row["Age"],
+            "owner": summary["owner"], "owner_label": v2.STAFF_OWNER_LABELS[summary["owner"]],
+            "tab": tab, "reason": summary["reason"], "risk": summary["risk"],
+            "age": age_label(waiting_since),
             "created_at": _iso(app.get("created_at")), "updated_at": _iso(app.get("updated_at")),
+            "waiting_since": _iso(waiting_since),
             "elapsed_ms": (run or {}).get("elapsed_ms"),
-            "has_run": bool(run),
         })
-    counts = completed_counts(apps, run_rows)
-    return {"metrics": counts, "queue": queue}
+    # Risk first, then the longest wait.
+    queue.sort(key=lambda r: (TAB_ORDER[r["tab"]], v2.RISK_ORDER[r["risk"]], r["waiting_since"] or ""))
+    submitted_ids = {a.get("id") for a in submitted}
+    counts = completed_counts(submitted, [r for r in run_rows if r.get("application_id") in submitted_ids])
+    tabs = {tab: sum(r["tab"] == tab for r in queue) for tab in TAB_ORDER}
+    oldest = next((r for r in sorted(queue, key=lambda r: r["waiting_since"] or "") if r["tab"] == "NEEDS_REVIEW"), None)
+    metrics = {**counts, "needs_review": tabs["NEEDS_REVIEW"], "waiting_on_vendor": tabs["WAITING_ON_VENDOR"],
+               "oldest_needs_review": oldest["age"] if oldest else None}
+    return {"metrics": metrics, "queue": queue}
 
 
 def _run_detail(run: dict) -> dict:
@@ -247,6 +277,16 @@ def _run_detail(run: dict) -> dict:
     }
 
 
+def _case_summary(app: dict, run: dict | None, review: dict | None) -> dict:
+    summary = v2.staff_summary(app, run, review)
+    return {
+        "owner": summary["owner"], "owner_label": v2.STAFF_OWNER_LABELS[summary["owner"]],
+        "primary_issue": summary["reason"], "risk": summary["risk"],
+        "flags": v2.team_flags(run) if summary["owner"] == v2.TEAM else [],
+        "vendor_items": [{"short": i["short"], "text": i["text"]} for i in v2.vendor_items(run)],
+    }
+
+
 def admin_case(app: dict, runs: list[dict], reviews: list[dict]) -> dict:
     latest_run = runs[0] if runs else None
     latest_review = reviews[0] if reviews else None
@@ -262,8 +302,7 @@ def admin_case(app: dict, runs: list[dict], reviews: list[dict]) -> dict:
         "contact": {"name": payload.get("contact_name") or "", "email": payload.get("contact_email") or "",
                     "state": payload.get("business_state") or ""},
         "reasons": selected_reasons(app, runs, reviews, audience="admin"),
-        "owner": next_action_owner(app, latest_run, latest_review),
-        "primary_issue": primary_review_issue(latest_run, latest_review),
+        **_case_summary(app, latest_run, latest_review),
         "issues": {"failed": failed, "unverified": unverified},
         "comparison": comparison_assessments(payload, (latest_run or {}).get("extracted_json") or {}, checks)
         if latest_run else [],

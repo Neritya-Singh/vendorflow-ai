@@ -13,6 +13,19 @@ export const STAGE_DEFS: { stage_id: string; label: string; description: string 
   { stage_id: "S9", label: "Persistence", description: "Decision, evidence versions and history saved" },
 ];
 
+/** Vendor wording for the same nine real stages (matches backend VENDOR_STAGES). */
+export const VENDOR_STAGE_DEFS: { stage_id: string; label: string; description: string }[] = [
+  { stage_id: "S1", label: "Received", description: "Your application arrived" },
+  { stage_id: "S2", label: "Opened your documents", description: "We opened your GST certificate and bank document" },
+  { stage_id: "S3", label: "Read the details", description: "We read the details printed on your documents" },
+  { stage_id: "S4", label: "Prepared the details", description: "Spacing and capitals tidied so numbers compare exactly" },
+  { stage_id: "S5", label: "Checked formats and compared documents", description: "Your details compared with your documents" },
+  { stage_id: "S6", label: "Checked our records", description: "Checked against our existing supplier records" },
+  { stage_id: "S7", label: "Decided", description: "Our onboarding rules applied" },
+  { stage_id: "S8", label: "Prepared your result", description: "Reasons and next step written" },
+  { stage_id: "S9", label: "Saved", description: "Your result and history saved" },
+];
+
 export function initialStages(): StageRow[] {
   return STAGE_DEFS.map((d) => ({
     stage_id: d.stage_id,
