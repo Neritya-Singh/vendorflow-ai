@@ -1,0 +1,4 @@
+# Local development and tests: v1.1 (incl. Streamlit) + v2 API + test client.
+-r requirements.txt
+-r backend/requirements.txt
+httpx==0.28.1
