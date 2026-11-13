@@ -131,7 +131,7 @@ def vendor_view(record: dict, runs: list[dict], reviews: list[dict]) -> dict:
         detail = vendor_next_step(record, latest_run, latest_review)
         if owner == "Technical retry":
             heading = "Retry the document check"
-            detail = ("Document processing is temporarily unavailable. Retry the check below without "
+            detail = ("Document processing is temporarily unavailable. Retry the check from your tracking page without "
                       "changing anything; your application ID and tracking code stay the same.")
 
     reviewer_note = None

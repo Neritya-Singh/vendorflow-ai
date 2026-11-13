@@ -191,15 +191,17 @@ class InMemorySupabase:
         return _Query(self, name)
 
 
-def _labelled(text: str, label: str) -> str | None:
+def _labelled(text: str, *labels: str) -> str | None:
+    """Value printed after one of the exact labels ("Label: value" or on the next line)."""
     lines = [line.strip() for line in text.splitlines()]
-    for index, line in enumerate(lines):
-        if line.casefold() == (label + ":").casefold() and index + 1 < len(lines):
-            return lines[index + 1]
-        if line.casefold().startswith(label.casefold() + ":"):
-            value = line[len(label) + 1:].strip()
-            if value:
-                return value
+    for label in labels:
+        key = label.casefold() + ":"
+        for index, line in enumerate(lines):
+            folded = line.casefold()
+            if folded == key and index + 1 < len(lines):
+                return lines[index + 1]
+            if folded.startswith(key) and line[len(key):].strip():
+                return line[len(key):].strip()
     return None
 
 
@@ -215,14 +217,14 @@ class OfflineLabelExtractor:
     def extract(self, gst_text: str, bank_text: str) -> ExtractedDocuments:
         return ExtractedDocuments(
             gst=GSTExtraction(
-                legal_name=_labelled(gst_text, "Legal business name") if gst_text else None,
+                legal_name=_labelled(gst_text, "Legal business name", "Legal name") if gst_text else None,
                 gstin=_labelled(gst_text, "GSTIN") if gst_text else None,
-                state=_labelled(gst_text, "Business state") if gst_text else None,
+                state=_labelled(gst_text, "Business state", "State") if gst_text else None,
                 address=_labelled(gst_text, "Business address") if gst_text else None,
             ),
             bank=BankExtraction(
-                holder_name=_labelled(bank_text, "Account holder") if bank_text else None,
-                account_number=_labelled(bank_text, "Account number") if bank_text else None,
-                ifsc=_labelled(bank_text, "IFSC") if bank_text else None,
+                holder_name=_labelled(bank_text, "Account holder", "Account holder name") if bank_text else None,
+                account_number=_labelled(bank_text, "Account number", "Account no") if bank_text else None,
+                ifsc=_labelled(bank_text, "IFSC", "IFSC code") if bank_text else None,
             ),
         )

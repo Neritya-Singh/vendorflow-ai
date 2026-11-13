@@ -44,9 +44,10 @@ class ConfigurationError(RuntimeError):
 
 
 def load_settings(*, env_file: bool = True) -> Settings:
-    if env_file:
-        load_dotenv(ROOT / ".env")
     offline = _flag("VENDORFLOW_OFFLINE_MODE")
+    if env_file and not offline:
+        # Offline test mode never reads .env, so real credentials cannot leak into it.
+        load_dotenv(ROOT / ".env")
     if offline and os.getenv("SUPABASE_URL", "").strip():
         # Never mix a simulated store with a configured real project by accident.
         raise ConfigurationError("VENDORFLOW_OFFLINE_MODE cannot be combined with SUPABASE_URL.")
