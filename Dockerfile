@@ -7,7 +7,7 @@ COPY frontend/ ./
 RUN npm run build
 
 FROM python:3.12-slim
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=8000
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 # B7: local OCR for photos and scanned PDFs (R13 grounding text). English data only.
 RUN apt-get update \
@@ -23,4 +23,7 @@ USER app
 EXPOSE 8000
 # Secrets (GEMINI_API_KEY, SUPABASE_URL, SUPABASE_SECRET_KEY, ADMIN_PASSWORD, SESSION_SECRET)
 # are injected by the host at runtime — never baked into the image.
-CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips='*'"]
+# Render (and most hosts) set PORT; 8000 locally. The client IP behind the platform proxy
+# is read by the app itself when TRUST_PROXY=1 (backend/security.py client_key), so
+# uvicorn must NOT trust X-Forwarded-For from any peer (that header is client-controlled).
+CMD ["sh", "-c", "exec uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000} --no-proxy-headers"]

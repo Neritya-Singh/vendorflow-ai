@@ -123,12 +123,33 @@ the same server correctly routes the reused fixture GSTIN to Pending through dup
 
 ## Deploy (one service)
 
-`Dockerfile` builds the React app and runs a single FastAPI container that serves `/api/*` and the SPA
-(no CORS, one host). Set these as **host-managed secrets**, never as Vite `VITE_*` variables:
-`GEMINI_API_KEY`, `GEMINI_MODEL`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `ADMIN_PASSWORD`,
-`SESSION_SECRET`, and `TRUST_PROXY=1` behind the platform proxy. Any Docker host works (Render, Fly.io,
-Cloud Run, Railway). Use a **new URL**: the Streamlit v1.1 submission URL stays as is. Deploying requires
-the owner's approval.
+`Dockerfile` builds the React app, installs Tesseract (English) and runs a single FastAPI container that
+serves `/api/*` and the SPA (no CORS, one host). It listens on `${PORT:-8000}` (Render sets `PORT`).
+Use a **new URL**: the Streamlit v1.1 submission URL stays as is. Deploying requires the owner's approval.
+
+**Render (Docker web service, Singapore):** runtime Docker, health check path `/api/health` (it needs no
+secrets and reports only whether each one is configured). Set these as **Render environment variables /
+secrets**, never as Vite `VITE_*` variables:
+
+| Name | Notes |
+|---|---|
+| `GEMINI_API_KEY` | secret |
+| `GEMINI_MODEL` | optional; defaults to the model in `backend/main.py` |
+| `SUPABASE_URL` | the staging project's URL |
+| `SUPABASE_SECRET_KEY` | secret (server-only; `SUPABASE_SERVICE_ROLE_KEY` is accepted as a legacy name) |
+| `ADMIN_PASSWORD` | secret; the deployed one, not a local test password |
+| `SESSION_SECRET` | secret; a new random value for the deployment |
+| `TRUST_PROXY` | `1` on Render (read the client IP from the platform proxy) |
+| `COOKIE_SECURE` | leave unset or `1` (default): the admin cookie is `Secure` |
+| `PORT` | set by Render; don't set it yourself |
+
+Never set `VENDORFLOW_OFFLINE_MODE` / `VENDORFLOW_OFFLINE_EXTRACTOR` in a deployment. Optional:
+`WORKSPACE_NAME`, `ADMIN_SESSION_HOURS`.
+
+Client IP behind the proxy (`TRUST_PROXY=1`, `backend/security.py`): Cloudflare's `CF-Connecting-IP` /
+`True-Client-IP` first, else the **right-most** `X-Forwarded-For` entry; client-supplied left-most entries
+are never trusted, and uvicorn runs with `--no-proxy-headers`. After the first deploy, confirm it: six wrong
+admin sign-ins sent with a different made-up `X-Forwarded-For` each must still lock the sign-in.
 
 ## Limitations (honest)
 
@@ -140,5 +161,11 @@ the owner's approval.
   not KYC/KYB, a GST registry lookup or bank-ownership verification.
 - The admin overview loads up to 1,000 runs and reviewer actions (prototype scale).
 - Photos: OCR is English-only Tesseract with simple lighting correction; it is tuned on synthetic
-  fixtures, not real phone photos. Offline tests use a Gemini stand-in that reads the fixture's embedded
-  ground truth instead of pixels; real Gemini image reading has not been tried yet.
+  fixtures, not real phone photos. Offline tests use a Gemini stand-in that finds the fixture's ground
+  truth by its pixels; real Gemini image reading was tried on staging (B10) and read every value correctly.
+- **OCR confusables (known, deferred):** Tesseract sometimes swaps look-alike characters on a clear
+  photo (`O`↔`0`, e.g. `DEMO0654321` read as `DEM00654321`; a doubled `V` in a name). R13 grounding then
+  can't confirm that value, so the vendor is asked for a clearer copy even though Gemini read it
+  correctly. This fails closed (never a wrong approval) but adds a needless retake: 3 of 16 synthetic
+  "clear" photos hit it in the P1 runs. A confusable-tolerant comparison is planned, not built.
+- Gemini response time varies widely (1.6–17 s per file was observed), and it is now most of an upload's wait.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import hmac
 import json
 import secrets
@@ -60,12 +61,34 @@ def read_session(settings: Settings, cookie: str | None) -> dict | None:
     return payload
 
 
+def _ip(value: str) -> str | None:
+    try:
+        return str(ipaddress.ip_address(value.strip()))
+    except ValueError:
+        return None
+
+
 def client_key(request: Request) -> str:
-    # Behind a single trusted proxy (Render/Fly/Cloud Run) the left-most
-    # X-Forwarded-For is the client; only honour it when explicitly configured.
-    forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded and request.app.state.trust_proxy:
-        return forwarded.split(",")[0].strip()
+    """The client address used for throttling.
+
+    Only with TRUST_PROXY=1 (behind the platform's proxy) are forwarded headers read:
+    1. CF-Connecting-IP / True-Client-IP, which Cloudflare (in front of Render) sets and
+       overwrites on every request, so a client can't choose them;
+    2. otherwise the RIGHT-most X-Forwarded-For entry: the one the nearest proxy appended.
+       The left-most entries are whatever the client sent (proxies append, they don't
+       clear), so trusting them would let anyone dodge the limits by changing the header.
+    Anything that isn't an IP address is ignored. Without TRUST_PROXY, the TCP peer.
+    """
+    if request.app.state.trust_proxy:
+        for header in ("cf-connecting-ip", "true-client-ip"):
+            found = _ip(request.headers.get(header, ""))
+            if found:
+                return found
+        hops = [h for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
+        if hops:
+            found = _ip(hops[-1])
+            if found:
+                return found
     return request.client.host if request.client else "unknown"
 
 
