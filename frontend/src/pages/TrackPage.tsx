@@ -1,9 +1,9 @@
 import { Eye, EyeOff, FileText, LogOut, RefreshCw, RotateCcw, Search, Send } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
-import { PageHeader } from "../components/AppShell";
+import { Link, useNavigate } from "react-router-dom";
+import { PageHeader, VendorFrame } from "../components/AppShell";
 import { FilePicker } from "../components/FilePicker";
-import { DecisionCard, SavedStages, ScopeNote, VendorStatusPill, VendorTimeline } from "../components/Outcome";
+import { DecisionCard, SavedStages, ScopeNote, VendorTimeline } from "../components/Outcome";
 import { MessageLog } from "../components/MessageLog";
 import { ProcessingPanel } from "../components/ProcessingPanel";
 import { BankSection, BusinessSection, type FieldErrors } from "../components/VendorFormSections";
@@ -194,7 +194,8 @@ function CorrectionForm({ view, creds, onSaved, retryOnly }: {
 }
 
 export function TrackPage() {
-  const { handoff, setHandoff } = useAppState();
+  const { handoff, setHandoff, updateApply } = useAppState();
+  const navigate = useNavigate();
   const [creds, setCreds] = useState<Credentials | null>(null);
   const [view, setView] = useState<VendorView | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -218,6 +219,14 @@ export function TrackPage() {
       .finally(() => setAutoLoading(false));
   }, [handoff, setHandoff]);
 
+  // A draft (not submitted yet) continues in the upload-first flow.
+  useEffect(() => {
+    if (view && creds && view.owner === "DRAFT") {
+      updateApply({ creds, step: 0, resume: true, receipt: null });
+      navigate("/apply");
+    }
+  }, [view, creds, updateApply, navigate]);
+
   const signOut = () => {
     setCreds(null);
     setView(null);
@@ -226,9 +235,10 @@ export function TrackPage() {
 
   if (!view || !creds) {
     return (
-      <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
-        <PageHeader eyebrow="Track" title="Track or correct an application" description="Enter the application ID and private tracking code from your receipt." />
-        <div className="mt-8">
+      <VendorFrame>
+        <div className="mx-auto w-full max-w-md py-4 sm:py-8">
+        <PageHeader title="Open your application" description="Enter the application ID and private tracking code you saved." />
+        <div className="mt-6">
           {autoLoading ? (
             <Spinner label="Opening your application…" />
           ) : (
@@ -238,7 +248,8 @@ export function TrackPage() {
             </>
           )}
         </div>
-      </div>
+        </div>
+      </VendorFrame>
     );
   }
 
@@ -249,31 +260,29 @@ export function TrackPage() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
+  if (view.owner === "DRAFT") return <VendorFrame><Spinner label="Opening your application…" /></VendorFrame>;
+
   return (
-    <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
-      <PageHeader
-        eyebrow="Application"
-        title={view.submitted.legal_name || view.application_id}
-        description={
-          <span className="inline-flex flex-wrap items-center gap-2">
-            <span className="font-mono text-[13px]">{view.application_id}</span>
-            <VendorStatusPill view={view} />
-          </span>
-        }
-        action={<Button variant="secondary" icon={LogOut} onClick={signOut}>Sign out</Button>}
-      />
-      <div className="mt-6 grid gap-5">
-        {notice ? <Alert tone="success">{notice}</Alert> : null}
-        {view.needs_resume ? null : <DecisionCard view={view} />}
-        <div className="grid items-start gap-5 lg:grid-cols-[1.5fr_1fr]">
-          <div className="grid gap-5">
+    <VendorFrame>
+      <div className="flex min-h-0 flex-1 flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-1 sm:px-2">
+        <div className="min-w-0">
+          <h1 className="truncate text-[22px] font-bold tracking-[-0.01em] text-ink sm:text-[26px]">{view.submitted.legal_name || "Your application"}</h1>
+          <p className="font-mono text-[13px] text-muted">{view.application_id}</p>
+        </div>
+        <Button variant="secondary" icon={LogOut} onClick={signOut}>Sign out</Button>
+      </div>
+      <div className="grid min-h-0 flex-1 gap-4 fit:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)] lg:grid-cols-[1.5fr_1fr]">
+          <div className="flex min-h-0 flex-col gap-4 fit:overflow-y-auto [&>*]:shrink-0">
+            {notice ? <Alert tone="success">{notice}</Alert> : null}
+            <DecisionCard view={view} />
             {view.editable || view.needs_resume || view.retry_available ? (
               <CorrectionForm key={formKey} view={view} creds={creds} onSaved={onSaved} retryOnly={view.retry_available && !view.editable} />
             ) : null}
             {view.stages.some((s) => s.state !== "NOT_RUN") ? <SavedStages view={view} /> : null}
           </div>
-          <div className="grid gap-5">
-            {view.messages.length ? <MessageLog messages={view.messages} /> : null}
+          <div className="flex min-h-0 flex-col gap-4 fit:overflow-y-auto [&>*]:shrink-0">
+            <MessageLog messages={view.messages} />
             {view.timeline.length ? <VendorTimeline items={view.timeline} /> : null}
             {view.documents.length ? (
               <Card>
@@ -294,8 +303,8 @@ export function TrackPage() {
             ) : null}
             <ScopeNote />
           </div>
-        </div>
       </div>
-    </div>
+      </div>
+    </VendorFrame>
   );
 }

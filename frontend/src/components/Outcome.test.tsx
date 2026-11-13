@@ -27,6 +27,8 @@ describe("DecisionCard", () => {
       />,
     );
     expect(screen.getByText("What we need from you (2 items)")).toBeInTheDocument();
+    // The status is said once (no eyebrow repeating the heading).
+    expect(screen.getAllByText("Action needed from you")).toHaveLength(1);
     expect(screen.getByText("Your files look swapped.")).toBeInTheDocument();
   });
 

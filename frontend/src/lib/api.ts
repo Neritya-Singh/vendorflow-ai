@@ -1,5 +1,6 @@
 import type {
-  AdminCase, ComparisonRow, Credentials, Health, Meta, Overview, StreamMessage, VendorFields, VendorView,
+  AdminCase, ComparisonRow, Contact, Credentials, DraftFieldKey, DraftStreamMessage, DraftView, Health, Meta, Overview,
+  Slot, StreamMessage, VendorFields, VendorView,
 } from "./types";
 
 export class ApiError extends Error {
@@ -47,6 +48,14 @@ export const api = {
   intake: () => request<Credentials>("/api/vendor/intake", { method: "POST" }),
   track: (creds: Credentials) =>
     request<VendorView>("/api/vendor/track", { method: "POST", body: JSON.stringify(creds) }),
+  openDraft: (creds: Credentials) =>
+    request<DraftView>("/api/vendor/draft", { method: "POST", body: JSON.stringify(creds) }),
+  saveDraft: (
+    creds: Credentials,
+    body: { changes?: Partial<Record<DraftFieldKey, string>>; reset?: DraftFieldKey[]; contact?: Contact; declaration?: boolean },
+  ) => request<DraftView>("/api/vendor/draft/values", { method: "PUT", body: JSON.stringify({ ...creds, ...body }) }),
+  removeDraftFile: (creds: Credentials, slot: Slot) =>
+    request<DraftView>("/api/vendor/draft/remove", { method: "POST", body: JSON.stringify({ ...creds, slot }) }),
 
   adminSession: () =>
     request<{ authenticated: boolean; csrf_token?: string; configured: boolean }>("/api/admin/session"),
@@ -106,11 +115,23 @@ export async function runWorkflow(
     form.set("expected_latest_run_id", payload.expected.latest_run_id);
   }
   const url = payload.expected ? "/api/vendor/resubmit" : "/api/vendor/applications";
+  return streamRequest(url, { method: "POST", body: form }, onMessage, signal);
+}
+
+/** POST and read an NDJSON stream of real server events (stages, then a result or error). */
+export async function streamRequest<M>(
+  url: string,
+  init: RequestInit,
+  onMessage: (message: M) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const headers = new Headers(init.headers);
+  if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
   let response: Response;
   try {
-    response = await fetch(url, { method: "POST", body: form, credentials: "same-origin", signal });
+    response = await fetch(url, { ...init, headers, credentials: "same-origin", signal });
   } catch {
-    throw new ApiError(0, "Your application could not be sent. Check your connection and try again.");
+    throw new ApiError(0, "Your request could not be sent. Check your connection and try again.");
   }
   if (!response.ok || !response.body) {
     const body = await response.json().catch(() => null);
@@ -132,9 +153,30 @@ export async function runWorkflow(
     while (newline >= 0) {
       const line = buffer.slice(0, newline).trim();
       buffer = buffer.slice(newline + 1);
-      if (line) onMessage(JSON.parse(line) as StreamMessage);
+      if (line) onMessage(JSON.parse(line) as M);
       newline = buffer.indexOf("\n");
     }
   }
-  if (buffer.trim()) onMessage(JSON.parse(buffer) as StreamMessage);
+  if (buffer.trim()) onMessage(JSON.parse(buffer) as M);
+}
+
+export function uploadDraftFile(creds: Credentials, slot: Slot, file: File, onMessage: (m: DraftStreamMessage) => void) {
+  const form = new FormData();
+  form.set("application_id", creds.application_id);
+  form.set("tracking_code", creds.tracking_code);
+  form.set("slot", slot);
+  form.set("file", file, file.name);
+  return streamRequest<DraftStreamMessage>("/api/vendor/draft/files", { method: "POST", body: form }, onMessage);
+}
+
+export function moveDraftFile(creds: Credentials, slot: Slot, onMessage: (m: DraftStreamMessage) => void) {
+  return streamRequest<DraftStreamMessage>("/api/vendor/draft/move", {
+    method: "POST", body: JSON.stringify({ ...creds, slot }),
+  }, onMessage);
+}
+
+export function submitDraft(creds: Credentials, onMessage: (m: StreamMessage) => void) {
+  return streamRequest<StreamMessage>("/api/vendor/draft/submit", {
+    method: "POST", body: JSON.stringify({ ...creds, declaration: true }),
+  }, onMessage);
 }

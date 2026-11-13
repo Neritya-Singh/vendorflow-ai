@@ -1,5 +1,5 @@
 import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
-import { VendorShell } from "./components/AppShell";
+import { VendorFrame } from "./components/AppShell";
 import { ApplyPage } from "./pages/ApplyPage";
 import { TrackPage } from "./pages/TrackPage";
 import { VendorHome } from "./pages/VendorHome";
@@ -10,11 +10,13 @@ import { AppStateProvider } from "./state";
 
 function NotFound() {
   return (
-    <div className="mx-auto max-w-md px-4 py-20 text-center">
-      <p className="text-sm font-semibold text-navy-600">404</p>
-      <h1 className="mt-1 text-2xl font-semibold text-slate-900">Page not found</h1>
-      <Link to="/" className="mt-4 inline-block text-sm font-medium text-navy-700 hover:underline">Go to the vendor workspace</Link>
-    </div>
+    <VendorFrame>
+      <div className="mx-auto max-w-md px-4 py-20 text-center">
+        <p className="text-sm font-semibold text-navy-600">404</p>
+        <h1 className="mt-1 text-2xl font-semibold text-slate-900">Page not found</h1>
+        <Link to="/" className="mt-4 inline-block text-sm font-medium text-navy-700 hover:underline">Go to supplier registration</Link>
+      </div>
+    </VendorFrame>
   );
 }
 
@@ -30,10 +32,10 @@ export function App() {
             <Route path="activity" element={<AdminActivity />} />
             <Route path="cases/:id" element={<AdminCase />} />
           </Route>
-          <Route path="/" element={<VendorShell><VendorHome /></VendorShell>} />
-          <Route path="/apply" element={<VendorShell><ApplyPage /></VendorShell>} />
-          <Route path="/track" element={<VendorShell><TrackPage /></VendorShell>} />
-          <Route path="*" element={<VendorShell><NotFound /></VendorShell>} />
+          <Route path="/" element={<VendorHome />} />
+          <Route path="/apply" element={<ApplyPage />} />
+          <Route path="/track" element={<TrackPage />} />
+          <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>
     </AppStateProvider>

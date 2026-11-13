@@ -201,7 +201,7 @@ _FILE_MESSAGES = {
     "nothing_found": "We couldn't find the details on this document. Check it's the right file or upload a clearer copy.",
     "unreadable": "We couldn't read this file. Upload a PDF with selectable text. Scans and photos are supported soon.",
     "unavailable": ("We couldn't read this file just now because of a temporary problem on our side. "
-                    "This isn't a problem with your file. Try again."),
+                    "This isn't a problem with your file. Type the details from it on the next step."),
 }
 
 
@@ -251,8 +251,8 @@ def draft_view(application_id: str, draft: dict, *, buyer: str = "Zamp AI") -> d
             documents_blockers.append(f"Move the {DOC_WORDS[file['suggested_slot']]} to its slot.")
         elif file["status"] in ("unreadable", "nothing_found"):
             documents_blockers.append(f"Upload a clearer copy of your {DOC_WORDS[slot]}.")
-        elif file["status"] == "unavailable":
-            documents_blockers.append(f"Try reading your {DOC_WORDS[slot]} again.")
+        # "unavailable" (provider outage) does not block: the vendor types the values and
+        # the case goes to the team; submit tries the reading again (V2_01 §6).
     for row in fields:
         if not row["value"]:
             details_blockers.append(f"Add your {row['label'] if row['key'] in ('gstin', 'ifsc') else row['label'].lower()}.")
@@ -266,6 +266,7 @@ def draft_view(application_id: str, draft: dict, *, buyer: str = "Zamp AI") -> d
     gst = doc_fields(draft, "GST") or {}
     return {
         "application_id": application_id, "owner": v2.DRAFT, "buyer": buyer,
+        "rev": int(draft.get("rev") or 0),  # parallel uploads: the client keeps the newest
         "files": files, "fields": fields,
         "pan": {"value": derived_pan(values["gstin"]), "source": "GSTIN"},
         "address": gst.get("address") or None,

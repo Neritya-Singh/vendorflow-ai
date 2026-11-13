@@ -1,5 +1,9 @@
 import { useCallback, useRef, useState } from "react";
 import { ApiError, runWorkflow, type WorkflowPayload } from "./api";
+import type { StreamMessage } from "./types";
+
+/** A submission: either the classic form payload or any streaming call (e.g. draft submit). */
+export type Runner = WorkflowPayload | ((onMessage: (m: StreamMessage) => void) => Promise<void>);
 import { applyStageEvent, initialStages } from "./stages";
 import type { StageRow, VendorView } from "./types";
 
@@ -31,14 +35,15 @@ export function useWorkflowRun() {
   const [state, setState] = useState<RunState>(fresh);
   const busy = useRef(false);
 
-  const start = useCallback(async (payload: WorkflowPayload) => {
+  const start = useCallback(async (payload: Runner) => {
     if (busy.current) return null;
     busy.current = true;
     setState({ ...fresh(), phase: "sending", sentAt: Date.now() });
     let finalResult: VendorView | null = null;
     let sawTerminalMessage = false;
     try {
-      await runWorkflow(payload, (message) => {
+      const send = typeof payload === "function" ? payload : (cb: (m: StreamMessage) => void) => runWorkflow(payload, cb);
+      await send((message) => {
         if (message.type === "accepted") {
           setState((s) => ({ ...s, phase: "running", acceptedAt: Date.now() }));
         } else if (message.type === "stage") {

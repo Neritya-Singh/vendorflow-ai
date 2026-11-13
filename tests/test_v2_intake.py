@@ -340,7 +340,17 @@ def test_reading_outage_at_upload_is_honest_and_fails_closed():
     view = draft_of(upload(client, c, "GST", gst))
     assert view["files"]["GST"]["status"] == "unavailable"
     assert "temporary problem on our side" in view["files"]["GST"]["message"]
-    assert field(view, "gstin")["status"] == "unread" and not view["documents_ready"]
+    assert field(view, "gstin")["status"] == "unread"
+    # An outage never traps the vendor: the documents step is not blocked by it.
+    _f2, _g2, bank = fixture("happy")
+    view = draft_of(upload(client, c, "BANK", bank))
+    assert view["documents_ready"]
+    fields, _g, _b = fixture("happy")
+    values = {k: fields[k] for k in ("legal_name", "gstin", "business_state", "bank_holder", "account_number", "ifsc")}
+    view = client.put("/api/vendor/draft/values", json={**c, "contact": CONTACT, "changes": values}).json()
+    assert view["details_ready"]
+    result = submit(client, c)
+    assert result["owner"] == "TEAM" and result["retry_available"] is True
 
 
 def test_cached_extractor_only_calls_provider_for_misses():

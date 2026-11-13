@@ -279,3 +279,61 @@ export interface LinkedRecord {
   latest_run_id: string | null;
   documents: ("GST" | "BANK")[];
 }
+
+// ---------------------------------------------------------------- B5/B6 upload-first draft
+export type Slot = "GST" | "BANK";
+export type FileStatus = "read" | "nothing_found" | "wrong_slot" | "unreadable" | "unavailable";
+export type FieldSource = "document" | "edited" | "vendor" | "missing" | "unread";
+export type DraftFieldKey = "legal_name" | "gstin" | "business_state" | "bank_holder" | "account_number" | "ifsc";
+
+export interface DraftFile {
+  filename: string;
+  status: FileStatus;
+  message: string;
+  suggested_slot: Slot | null;
+  pages: number | null;
+  uploaded_at: string | null;
+}
+
+export interface DraftField {
+  key: DraftFieldKey;
+  label: string;
+  document: Slot;
+  /** Account number is masked to its last 4 digits. */
+  value: string;
+  document_value: string | null;
+  status: FieldSource;
+  error: string | null;
+}
+
+export interface Contact {
+  name: string;
+  email: string;
+  phone: string;
+}
+
+export interface DraftView {
+  application_id: string;
+  owner: "DRAFT";
+  buyer: string;
+  /** Draft revision; parallel requests may answer out of order. */
+  rev: number;
+  files: Record<Slot, DraftFile | null>;
+  fields: DraftField[];
+  pan: { value: string; source: "GSTIN" };
+  address: string | null;
+  contact: Contact;
+  contact_errors: Partial<Record<keyof Contact, string>>;
+  declaration: boolean;
+  documents_ready: boolean;
+  details_ready: boolean;
+  blockers: string[];
+  flagged: DraftFieldKey[];
+}
+
+export type DraftStreamMessage =
+  | { type: "accepted"; at: string }
+  | { type: "heartbeat" }
+  | StageEvent
+  | { type: "result"; data: DraftView }
+  | { type: "error"; status: number; kind: string; message: string };

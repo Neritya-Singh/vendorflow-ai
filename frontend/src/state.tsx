@@ -1,17 +1,19 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api } from "./lib/api";
-import { EMPTY_FIELDS, type Credentials, type Health, type Meta, type VendorFields, type VendorView } from "./lib/types";
+import type { Credentials, Health, Meta, VendorView } from "./lib/types";
 
 /**
- * In-memory only. Drafts, files and tracking credentials are never written to
- * localStorage/sessionStorage; a page reload intentionally clears them.
+ * In-memory only. The draft itself (files, read values, contact) is saved on the
+ * server as soon as the first file is uploaded; the browser keeps just the
+ * credentials and the current step. Nothing is written to localStorage or
+ * sessionStorage, so a reload forgets the tracking code (it can be re-entered).
  */
-interface Draft {
-  fields: VendorFields;
-  gst: File | null;
-  bank: File | null;
-  step: number;
+export interface ApplyState {
   creds: Credentials | null;
+  /** 0 documents · 1 details · 2 submit */
+  step: number;
+  /** True when the credentials belong to an existing server draft to reopen. */
+  resume: boolean;
   receipt: { creds: Credentials; view: VendorView } | null;
 }
 
@@ -19,22 +21,22 @@ interface AppState {
   health: Health | null;
   meta: Meta | null;
   bootError: string | null;
-  draft: Draft;
-  updateDraft: (patch: Partial<Draft>) => void;
-  resetDraft: () => void;
+  apply: ApplyState;
+  updateApply: (patch: Partial<ApplyState>) => void;
+  resetApply: () => void;
   handoff: Credentials | null;
   setHandoff: (creds: Credentials | null) => void;
 }
 
 const FALLBACK_META: Meta = { states: [], max_pdf_bytes: 5 * 1024 * 1024, stages: [] };
-const emptyDraft = (): Draft => ({ fields: { ...EMPTY_FIELDS }, gst: null, bank: null, step: 0, creds: null, receipt: null });
+const emptyApply = (): ApplyState => ({ creds: null, step: 0, resume: false, receipt: null });
 const Ctx = createContext<AppState | null>(null);
 
 export function AppStateProvider({ children }: { children: ReactNode }) {
   const [health, setHealth] = useState<Health | null>(null);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Draft>(emptyDraft);
+  const [apply, setApply] = useState<ApplyState>(emptyApply);
   const [handoff, setHandoff] = useState<Credentials | null>(null);
 
   useEffect(() => {
@@ -49,12 +51,12 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       });
   }, []);
 
-  const updateDraft = useCallback((patch: Partial<Draft>) => setDraft((d) => ({ ...d, ...patch })), []);
-  const resetDraft = useCallback(() => setDraft(emptyDraft()), []);
+  const updateApply = useCallback((patch: Partial<ApplyState>) => setApply((d) => ({ ...d, ...patch })), []);
+  const resetApply = useCallback(() => setApply(emptyApply()), []);
 
   const value = useMemo(
-    () => ({ health, meta, bootError, draft, updateDraft, resetDraft, handoff, setHandoff }),
-    [health, meta, bootError, draft, updateDraft, resetDraft, handoff],
+    () => ({ health, meta, bootError, apply, updateApply, resetApply, handoff, setHandoff }),
+    [health, meta, bootError, apply, updateApply, resetApply, handoff],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

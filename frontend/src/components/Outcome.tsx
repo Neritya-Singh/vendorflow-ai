@@ -23,11 +23,14 @@ export function DecisionCard({ view }: { view: VendorView }) {
   const hero = HERO[heroKey(view)];
   const Icon = hero.icon;
   return (
-    <Card className={cx("overflow-hidden", hero.ring)} aria-live="polite" data-status={view.status} data-owner={view.owner}>
+    <Card className={cx("overflow-hidden rounded-[20px]", hero.ring)} aria-live="polite" data-status={view.status} data-owner={view.owner}>
       <div className={cx("flex items-start gap-4 px-5 py-5 sm:px-6", hero.band)}>
         <Icon className={cx("mt-0.5 size-8 shrink-0", hero.iconColor)} aria-hidden />
         <div className="min-w-0">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{view.status_label}</p>
+          {/* The status is said once: no eyebrow when it would repeat the heading. */}
+          {view.status_label && !view.heading.startsWith(view.status_label) ? (
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{view.status_label}</p>
+          ) : null}
           <h2 className="text-2xl font-semibold tracking-tight text-slate-900">{view.heading}</h2>
           {view.reasons.map((reason) => (
             <p key={reason} className="mt-1 text-[15px] leading-relaxed text-slate-700">{reason}</p>

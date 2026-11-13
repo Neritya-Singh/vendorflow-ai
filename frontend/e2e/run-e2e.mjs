@@ -34,35 +34,70 @@ async function noHorizontalOverflow(page) {
   return page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1);
 }
 
-async function apply(page, base, data, gstPath, bankPath, label) {
+const FIELD_LABELS = { legal_name: "Legal name", gstin: "GSTIN", bank_holder: "Account holder", account_number: "Account number", ifsc: "IFSC" };
+
+/** Wait until no upload slot is still reading; returns the slot states, e.g. ["read", "read"]. */
+async function slotStates(page, files = 0) {
+  await page.waitForFunction((n) => {
+    const states = [...document.querySelectorAll("[data-slot-state]")].map((e) => e.getAttribute("data-slot-state"));
+    return states.length === 2 && !states.includes("reading") && states.filter((x) => x !== "empty").length >= n;
+  }, files, { timeout: 60_000 });
+  return page.$$eval("[data-slot-state]", (els) => els.map((e) => e.getAttribute("data-slot-state")));
+}
+
+/** Upload-first flow (B5/B6): documents → details → submit → live check → result. */
+async function startDocs(page, base, gstPath, bankPath) {
   await page.goto(`${base}/apply`);
-  await page.getByLabel("Legal business name").fill(data.legal_name);
-  await page.getByLabel("Contact email").fill(data.contact_email);
-  await page.getByLabel("Contact person").fill(data.contact_name);
-  await page.getByLabel("Business state / UT").selectOption(data.business_state.toUpperCase());
-  await page.getByLabel("PAN", { exact: true }).fill(data.pan);
-  await page.getByLabel("GSTIN", { exact: true }).fill(data.gstin);
-  if (label === "happy") await shot(page, "02-apply-step1");
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByLabel("Account holder name").fill(data.bank_holder);
-  await page.getByLabel("Bank account number").fill(data.account_number);
-  await page.getByLabel("IFSC").fill(data.ifsc);
-  const inputs = page.locator('input[type="file"]');
-  if (gstPath) await inputs.nth(0).setInputFiles(gstPath);
-  if (bankPath) await inputs.nth(1).setInputFiles(bankPath);
-  if (label === "happy") await shot(page, "03-apply-step2");
-  await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByText("Private tracking code").first().waitFor();
+  await page.locator('input[data-slot="GST"]').waitFor({ state: "attached" });
   const id = (await page.locator("code").nth(0).textContent()).trim();
   const code = (await page.locator("code").nth(1).textContent()).trim();
-  if (label === "happy") await shot(page, "04-apply-review");
+  // Both files go up at once; each slot reads independently.
+  if (gstPath) await page.locator('input[data-slot="GST"]').setInputFiles(gstPath);
+  if (bankPath) await page.locator('input[data-slot="BANK"]').setInputFiles(bankPath);
+  return { id, code, states: await slotStates(page, [gstPath, bankPath].filter(Boolean).length) };
+}
+
+async function fillDetails(page, data, { typeAll = false, edit = {} } = {}) {
+  await page.getByRole("button", { name: /Continue/ }).click();
+  await page.getByRole("heading", { name: "Check your details" }).waitFor();
+  if (typeAll) {
+    for (const [key, label] of Object.entries(FIELD_LABELS)) {
+      await page.getByLabel(label, { exact: true }).fill(data[key]);
+      await page.getByLabel(label, { exact: true }).press("Tab");
+    }
+    await page.getByLabel("State", { exact: true }).selectOption({ label: data.business_state });
+  }
+  for (const [key, value] of Object.entries(edit)) {
+    const card = key === "account_number" || key === "ifsc" || key === "bank_holder" ? "bank account" : "business";
+    const field = page.getByLabel(FIELD_LABELS[key], { exact: true });
+    if (!(await field.count())) await page.getByRole("button", { name: `Edit ${card}` }).click();
+    await field.fill(value);
+    await field.press("Tab");
+  }
+  await page.getByLabel("Contact name").fill(data.contact_name);
+  await page.getByLabel("Phone").fill("+91 98765 43210");
+  await page.getByLabel("Email").fill(data.contact_email);
+  await page.getByLabel("Email").press("Tab");
+}
+
+async function submitDetails(page, label) {
+  await page.getByRole("button", { name: /Continue/ }).click();
+  await page.getByRole("heading", { name: "Review and submit" }).waitFor();
   const submit = page.getByRole("button", { name: "Submit for checking" });
-  check(`${label}: submit disabled until recovery details acknowledged`, await submit.isDisabled());
+  check(`${label}: submit disabled until the declaration is ticked`, await submit.isDisabled());
   await page.getByRole("checkbox").check();
   await submit.click();
   await page.getByRole("heading", { name: "Your result" }).waitFor({ timeout: 90_000 });
-  const decision = await outcome(page);
-  return { id, code, decision };
+  return outcome(page);
+}
+
+async function apply(page, base, data, gstPath, bankPath, label, opts = {}) {
+  const started = await startDocs(page, base, gstPath, bankPath);
+  if (label === "happy") await shot(page, "02-apply-documents");
+  await fillDetails(page, data, opts);
+  if (label === "happy") await shot(page, "03-apply-details");
+  const decision = await submitDetails(page, label);
+  return { ...started, decision };
 }
 
 /** "STATUS/OWNER" from the vendor decision card, e.g. "PENDING/TEAM". */
@@ -142,10 +177,15 @@ try {
   check("B correction saved with honest toast", true);
   await ap.waitForURL(/\/admin(\?.*)?$/);
   check("B auto-advances (no more cases needing review → back to the queue)", true);
+  await ap.getByRole("tab", { name: /Waiting on vendor/ }).click();
+  await ap.locator("tbody tr", { hasText: B.id }).waitFor({ timeout: 5_000 }).catch(() => {});
+  const waiting = await ap.locator("tbody").textContent();
+  check("'Waiting on vendor' tab lists the correction-requested case", waiting.includes(B.id) && waiting.includes("Correction requested"), waiting.slice(0, 200));
 
   await track(page, BASE, B.id, B.code);
   await page.getByText("Upload a bank letter showing the company's legal name").first().waitFor();
   check("B vendor sees reviewer message", true);
+  check("B 'Action needed from you' is said once", (await page.getByText("Action needed from you", { exact: true }).count()) === 1);
   const log = await page.locator("section", { hasText: "Messages from our team" }).first().textContent();
   check("B vendor message log lists the correction and the earlier outcome", log.includes("Our team needs one change")
     && log.includes("with our team for a final check") && !/email sent/i.test(log));
@@ -236,28 +276,60 @@ try {
   await ap.getByText("Decision saved · Message added for vendor").waitFor();
   check("I rejected via keyboard with a quick reason", true);
 
-  // ------------------------------------------------------------ C. swapped PDFs
+  // ------------------------------------------------------------ C. swapped files: warned on the slot, fixed with "Move it"
   const acme = fixture("happy");
-  const C = await apply(page, BASE, acme, pdf("happy", "bank"), pdf("happy", "gst"), "swapped");
-  const cText = await page.locator("main").textContent();
-  check("C swapped PDFs → Pending, waiting on vendor", C.decision === "PENDING/VENDOR", C.decision);
-  check("C vendor told the files look swapped", cText.includes("Your files look swapped"));
-  await shot(page, "12-receipt-swapped");
+  const C = await startDocs(page, BASE, pdf("happy", "bank"), pdf("happy", "gst"));
+  check("C swapped files → both slots warn before submitting", C.states.join() === "wrong_slot,wrong_slot", C.states.join());
+  check("C slot says which slot the file belongs in", (await page.locator("main").textContent())
+    .includes("This looks like a bank document. Did you mean to put it in the bank slot?"));
+  await shot(page, "12-apply-wrong-slot");
+  check("C Continue blocked while a file is in the wrong slot", await page.getByRole("button", { name: /Continue/ }).isDisabled());
+  await page.getByRole("button", { name: "Move it" }).first().click();
+  const moved = await page.waitForFunction(() => [...document.querySelectorAll("[data-slot-state]")]
+    .map((e) => e.getAttribute("data-slot-state")).join() === "read,read", null, { timeout: 60_000 }).then(() => true, () => false);
+  check("C one 'Move it' swaps both files and reads them", moved);
+  await fillDetails(page, acme);
+  C.decision = await submitDetails(page, "swapped");
+  check("C after the move the case is never sent back for swapped files", C.decision !== "PENDING/VENDOR", C.decision);
 
-  // ------------------------------------------------------------ D. unreadable bank PDF
-  const D = await apply(page, BASE, fixture("frontend_ec2_review"), pdf("frontend_ec2_review", "gst"), UNREADABLE, "unreadable");
-  const dText = await page.locator("main").textContent();
-  check("D unreadable bank PDF → Pending, waiting on vendor", D.decision === "PENDING/VENDOR", D.decision);
-  check("D vendor told to replace the bank document", dText.includes("couldn't read your bank document"));
+  // ------------------------------------------------------------ D. unreadable bank PDF: blocked at upload
+  const D = await startDocs(page, BASE, pdf("frontend_ec2_review", "gst"), UNREADABLE);
+  check("D unreadable bank PDF flagged on its slot", D.states.join() === "read,unreadable", D.states.join());
+  check("D vendor asked for a clearer copy before submitting", (await page.locator("main").textContent()).includes("We couldn't read this file")
+    && await page.getByRole("button", { name: /Continue/ }).isDisabled());
+
+  // ------------------------------------------------------------ J. edited value + value not on the document
+  const ec4 = fixture("ec4_missing_bank_holder");
+  const J = await startDocs(page, BASE, pdf("ec4_missing_bank_holder", "gst"), pdf("ec4_missing_bank_holder", "bank"));
+  await fillDetails(page, ec4, { edit: { ifsc: "DEMO0999999" } });
+  check("J field missing from the document is marked 'Not found'", (await page.locator("main").textContent()).includes("Not found on your bank document"));
+  await page.getByLabel("Account holder", { exact: true }).fill(ec4.bank_holder);
+  await page.getByLabel("Account holder", { exact: true }).press("Tab");
+  await page.locator('[data-tag="entered"]').waitFor();
+  await page.locator('[data-tag="changed"]').waitFor();
+  check("J typed value tagged 'Entered by you' and edited value 'Changed by you'", true);
+  await shot(page, "12b-details-edited-and-not-found");
+  const vendorNoScroll = () => page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  check("Fit-to-screen: vendor details step does not scroll at 1440×900", await vendorNoScroll());
+  await page.setViewportSize({ width: 1280, height: 760 });
+  check("Fit-to-screen: vendor details step does not scroll at 1280×760", await vendorNoScroll());
+  await page.setViewportSize({ width: 1360, height: 900 });
+  J.decision = await submitDetails(page, "edited");
+  check("J changed/typed values → Pending, with our team (no action asked)", J.decision === "PENDING/TEAM", J.decision);
 
   // ------------------------------------------------------------ E. Gemini provider failure (real client, no key)
   const outagePage = await ctx.newPage();
-  const E = await apply(outagePage, OUTAGE, fixture("frontend_ec2_review"), pdf("frontend_ec2_review", "gst"), pdf("frontend_ec2_review", "bank"), "outage");
+  const E = await startDocs(outagePage, OUTAGE, pdf("frontend_ec2_review", "gst"), pdf("frontend_ec2_review", "bank"));
+  check("E reading outage shown on the slots without blaming the files", E.states.join() === "unavailable,unavailable"
+    && (await outagePage.locator("main").textContent()).includes("temporary problem on our side"), E.states.join());
+  await fillDetails(outagePage, fixture("frontend_ec2_review"), { typeAll: true });
+  E.decision = await submitDetails(outagePage, "outage");
   const eText = await outagePage.locator("main").textContent();
   check("E Gemini failure → Pending, with our team (never approved)", E.decision === "PENDING/TEAM", E.decision);
   check("E truthful 'temporary problem on our side' message", eText.includes("temporary problem on our side"));
   check("E does not blame the documents", !/unreadable|clearer copy/i.test(eText));
-  check("E reading stage shown as couldn't finish", (await outagePage.getByText("Couldn't finish ·").count()) >= 1);
+  check("E reading stage shown as couldn't finish", (await outagePage.getByText(/Couldn't finish/).count()) >= 1);
   await shot(outagePage, "13-receipt-gemini-unavailable");
   await track(outagePage, OUTAGE, E.id, E.code);
   await outagePage.getByRole("button", { name: "Retry check now" }).waitFor();
@@ -284,17 +356,12 @@ try {
   await ap.goto(`${BASE}/admin`);
   await ap.getByRole("heading", { name: "Applications" }).waitFor();
   check("Fit-to-screen: queue does not scroll at 1440×950", await ap.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1));
-  await ap.getByRole("tab", { name: /Waiting on vendor/ }).click();
-  await ap.locator('[role="tab"][aria-selected="true"]', { hasText: "Waiting on vendor" }).waitFor();
-  await ap.locator("tbody tr", { hasText: C.id }).waitFor({ timeout: 5_000 }).catch(() => {});
-  const waiting = await ap.locator("tbody").textContent();
-  check("'Waiting on vendor' tab lists the swapped-files case", waiting.includes(C.id) && waiting.includes("files look swapped"), waiting.slice(0, 200));
   const pdfStatus = await ap.evaluate(async (id) => {
     const c = await (await fetch(`/api/admin/applications/${id}`)).json();
     const run = c.runs[0];
     const r = await fetch(`/api/admin/applications/${id}/runs/${run.id}/documents/${run.pdf_types[0]}`);
     return `${r.status} ${r.headers.get("content-type")}`;
-  }, D.id);
+  }, A.id);
   check("Admin can open the exact committed PDF", pdfStatus === "200 application/pdf", pdfStatus);
   await ap.getByRole("tab", { name: /All/ }).click();
   await shot(ap, "15-admin-queue-all");
@@ -308,11 +375,17 @@ try {
   await mp.goto(BASE);
   check("Mobile home has no horizontal overflow", await noHorizontalOverflow(mp));
   await shot(mp, "16-mobile-home");
-  await mp.goto(`${BASE}/apply`);
-  check("Mobile apply has no horizontal overflow", await noHorizontalOverflow(mp));
-  await shot(mp, "17-mobile-apply");
-  await track(mp, BASE, C.id, C.code);
-  await mp.getByText("Fix the items above").waitFor();
+  const M = await startDocs(mp, BASE, pdf("frontend_happy", "gst"), pdf("frontend_happy", "bank"));
+  check("Mobile documents step fits one screen", await mp.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1)
+    && await noHorizontalOverflow(mp), M.states.join());
+  await shot(mp, "17-mobile-apply-documents");
+  await mp.getByRole("button", { name: /Continue/ }).click();
+  await mp.getByRole("heading", { name: "Check your details" }).waitFor();
+  const cont = await mp.getByRole("button", { name: /Continue/ }).boundingBox();
+  check("Mobile details scroll with Continue kept visible", await mp.evaluate(() => document.documentElement.scrollHeight > innerHeight)
+    && cont && cont.y + cont.height <= 844 && await noHorizontalOverflow(mp));
+  await track(mp, BASE, A.id, A.code);
+  await mp.locator("[data-status]").first().waitFor();
   check("Mobile tracking has no horizontal overflow", await noHorizontalOverflow(mp));
   await shot(mp, "18-mobile-track");
   await mobile.close();
