@@ -1,4 +1,4 @@
-import { FlaskConical, ShieldCheck } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { useAppState } from "../state";
@@ -36,23 +36,13 @@ function NavItem({ to, children, end }: { to: string; children: ReactNode; end?:
   );
 }
 
-export function OfflineBanner() {
-  const { health, bootError } = useAppState();
-  if (bootError) {
-    return (
-      <div role="alert" className="bg-red-700 px-4 py-2 text-center text-[13px] font-medium text-white">
-        {bootError}
-      </div>
-    );
-  }
-  if (health?.mode !== "offline") return null;
+/** Shown only when the app could not start (e.g. the API is unreachable). */
+export function BootErrorBanner() {
+  const { bootError } = useAppState();
+  if (!bootError) return null;
   return (
-    <div className="flex items-center justify-center gap-2 bg-amber-100 px-4 py-1.5 text-center text-[12.5px] text-amber-950">
-      <FlaskConical className="size-3.5 shrink-0" aria-hidden />
-      <span>
-        <strong>Offline test mode.</strong> Real PDF reading, rules and workflow — with an in-memory database and a
-        test extractor instead of Supabase and Gemini. Records vanish when the server restarts.
-      </span>
+    <div role="alert" className="bg-red-700 px-4 py-2 text-center text-[13px] font-medium text-white">
+      {bootError}
     </div>
   );
 }
@@ -61,7 +51,7 @@ export function VendorShell({ children }: { children: ReactNode }) {
   const location = useLocation();
   return (
     <div className="flex min-h-dvh flex-col">
-      <OfflineBanner />
+      <BootErrorBanner />
       <header className="sticky top-0 z-20 border-b border-line bg-white">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-4 px-4 sm:px-6">
           <Logo />

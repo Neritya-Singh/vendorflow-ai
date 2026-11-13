@@ -1,7 +1,7 @@
 import { CheckCircle2, Lock, LogOut, Plus, Search, ShieldCheck } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { OfflineBanner } from "../../components/AppShell";
+import { BootErrorBanner } from "../../components/AppShell";
 import { Alert, Button, Card, Field, Input, Spinner, cx } from "../../components/ui";
 import { ApiError, api, setCsrf } from "../../lib/api";
 import { useAppState } from "../../state";
@@ -25,7 +25,7 @@ function Login({ onDone, configured }: { onDone: () => void; configured: boolean
   const [error, setError] = useState<string | null>(null);
   return (
     <div className="flex min-h-dvh flex-col bg-canvas">
-      <OfflineBanner />
+      <BootErrorBanner />
       <div className="flex flex-1 items-center justify-center px-4 py-12">
         <div className="w-full max-w-sm">
           <div className="mb-6 flex items-center justify-center gap-2 text-navy-900">
@@ -205,7 +205,7 @@ export function AdminLayout() {
   return (
     <Ctx.Provider value={{ signOut, onUnauthorized, toast }}>
       <div className="flex min-h-dvh flex-col bg-canvas fit:h-dvh fit:overflow-hidden">
-        <OfflineBanner />
+        <BootErrorBanner />
         <div className="flex min-h-0 flex-1 flex-col gap-4 p-3 sm:p-4">
           <header className="flex flex-wrap items-center gap-x-6 gap-y-3 rounded-2xl border border-line bg-white py-2.5 pl-5 pr-4">
             <Link to="/admin" className="flex items-center gap-2.5">
