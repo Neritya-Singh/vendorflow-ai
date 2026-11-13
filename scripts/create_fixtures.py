@@ -7,7 +7,7 @@ from reportlab.lib.colors import HexColor
 from reportlab.lib.pagesizes import A4
 
 BASE = Path(__file__).resolve().parents[1] / "fixtures"
-GSTIN = "09ABCDE1234F1Z5"
+GSTIN = "09ABCDE1234F1ZY"  # valid GSTIN check digit (v2 B5)
 PAN = "ABCDE1234F"
 
 

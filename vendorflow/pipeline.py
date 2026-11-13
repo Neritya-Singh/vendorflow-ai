@@ -13,6 +13,7 @@ from .rules import checks_without_duplicate, duplicate_check, make_decision, nor
 StageCallback = Callable[[StageEvent], None]
 Lookup = Callable[[str, str], list[str]]
 Screening = Callable[[VendorSubmission, str], list[CheckResult]]
+EvidenceChecks = Callable[[VendorSubmission, ExtractedDocuments], list[CheckResult]]
 
 
 class MinimumIntakeError(ValueError):
@@ -21,13 +22,16 @@ class MinimumIntakeError(ValueError):
 
 class ProcessingPipeline:
     def __init__(self, extractor: Extractor, approved_lookup: Lookup | None = None, *,
-                 screening: Screening | None = None, name_key: Callable[[str | None], str] | None = None):
-        """`screening` and `name_key` are optional v2 policy hooks. When omitted the
-        v1.1 behaviour (approved-only duplicate check, strict name compare) is unchanged."""
+                 screening: Screening | None = None, name_key: Callable[[str | None], str] | None = None,
+                 evidence_checks: EvidenceChecks | None = None):
+        """`screening`, `name_key` and `evidence_checks` are optional v2 policy hooks. When
+        omitted the v1.1 behaviour (approved-only duplicate check, strict name compare,
+        no extra rule checks) is unchanged."""
         self.extractor = extractor
         self.approved_lookup = approved_lookup
         self.screening = screening
         self.name_key = name_key
+        self.evidence_checks = evidence_checks
 
     def evaluate(self, vendor: VendorSubmission, gst_upload: PDFInput | None, bank_upload: PDFInput | None,
                  *, application_id: str | None = None, trigger: str = "submission",
@@ -107,6 +111,8 @@ class ProcessingPipeline:
         checks = checks_without_duplicate(normalized, extracted, gst_pdf, bank_pdf, extraction_error,
                                           swapped_documents=swapped_documents,
                                           **({"name_key": self.name_key} if self.name_key else {}))
+        if self.evidence_checks is not None:
+            checks.extend(self.evidence_checks(normalized, extracted))
         failed_count = sum(c.state.value != "PASS" for c in checks)
         emit("S5", "Apply deterministic rules", "COMPLETED", f"{failed_count} checks require attention")
 

@@ -37,9 +37,11 @@ def _iso(value: Any) -> str | None:
     return str(value)
 
 
-def result_as_run(result: WorkflowResult, manifest: list[dict] | None = None) -> dict:
+def result_as_run(result: WorkflowResult, manifest: list[dict] | None = None,
+                  payload: dict | None = None) -> dict:
     """The same shape as a saved `runs` row, built from an in-flight result."""
     return {
+        "payload_json": payload or {},
         "id": result.run_id, "trigger": result.trigger, "status": result.status.value,
         "checks_json": [c.model_dump(mode="json") for c in result.checks],
         "reasons_json": list(result.reasons), "all_reasons_json": list(result.all_reasons),
@@ -85,6 +87,8 @@ VENDOR_STAGES = {
     "S5": "Checked formats and compared documents", "S6": "Checked our records", "S7": "Decided",
     "S8": "Prepared your result", "S9": "Saved",
 }
+# Per-file reading stages at upload time (V2_02 §5 "Reading").
+READING_STAGES = {"U1": "Received", "U2": "Identified the document type", "U3": "Read the details"}
 
 
 def vendor_stage_rows(events: list[dict]) -> list[dict]:
@@ -164,8 +168,8 @@ def vendor_view(record: dict, runs: list[dict], reviews: list[dict], *, buyer: s
         next_step = f"This decision is final. If you have questions, contact {buyer}'s finance team."
     elif owner == v2.DRAFT:
         status_label, heading = v2.VENDOR_STATUS_LABELS[owner], "Continue your application"
-        messages = ["Your application was started but not checked yet."]
-        next_step = "Upload your documents again and submit them for checking. Your application ID stays the same."
+        messages = ["Your application was started but not submitted yet."]
+        next_step = "Continue where you left off. Your uploaded documents and details are saved."
     elif owner == v2.VENDOR:
         status_label = heading = v2.VENDOR_STATUS_LABELS[owner]
         if correction:
@@ -236,7 +240,7 @@ def vendor_view(record: dict, runs: list[dict], reviews: list[dict], *, buyer: s
         "needs_resume": status == "PENDING" and owner == v2.DRAFT,
         "revision": int(record.get("revision") or 0),
         "latest_run_id": record.get("latest_run_id"),
-        "submitted": record.get("payload_json") or {},
+        "submitted": {k: v for k, v in (record.get("payload_json") or {}).items() if k != "draft"},
         "created_at": _iso(record.get("created_at")),
     }
 
@@ -246,7 +250,7 @@ def receipt_view(application_id: str, result: WorkflowResult, vendor: dict, mani
     record = {"id": application_id, "current_status": result.status.value,
               "decision_source": "AUTOMATED", "payload_json": vendor,
               "latest_run_id": result.run_id, "revision": None}
-    view = vendor_view(record, [result_as_run(result, manifest)], [], buyer=buyer)
+    view = vendor_view(record, [result_as_run(result, manifest, vendor)], [], buyer=buyer)
     view["persisted"] = result.persisted
     view.pop("revision")
     return view
@@ -443,7 +447,12 @@ def admin_case(app: dict, runs: list[dict], reviews: list[dict], linked: list[di
         "latest_run_id": app.get("latest_run_id"),
         "created_at": _iso(app.get("created_at")), "updated_at": _iso(app.get("updated_at")),
         "contact": {"name": payload.get("contact_name") or "", "email": payload.get("contact_email") or "",
-                    "state": payload.get("business_state") or ""},
+                    "phone": payload.get("contact_phone") or "", "state": payload.get("business_state") or ""},
+        "declared": bool(payload.get("declaration")),
+        # B5: which values the vendor changed or typed (both values shown in "Compared values").
+        "provenance": [{"field": r["field"], "label": r["staff_label"], "status": r["status"]}
+                       for r in v2.field_provenance(payload, (latest_run or {}).get("extracted_json") or {})]
+        if latest_run else [],
         "reasons": selected_reasons(app, runs, reviews, audience="admin"),
         **_case_summary(app, latest_run, latest_review),
         "issues": {"failed": failed, "unverified": unverified},

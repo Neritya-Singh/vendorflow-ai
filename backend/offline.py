@@ -27,11 +27,21 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _path(row: dict, col: str):
+    """PostgREST-style column path: "payload_json->draft->>rev"."""
+    parts = col.replace("->>", "->").split("->")
+    value = row.get(parts[0])
+    for part in parts[1:]:
+        value = value.get(part) if isinstance(value, dict) else None
+    return str(value) if "->>" in col and value is not None else value
+
+
 class _Query:
     def __init__(self, db: "InMemorySupabase", name: str):
         self.db, self.name = db, name
         self.predicates = []
         self.to_insert = None
+        self.to_update = None
         self.order_col = None
         self.desc = False
         self.num = None
@@ -40,7 +50,17 @@ class _Query:
         return self
 
     def eq(self, col, value):
-        self.predicates.append(lambda r: r.get(col) == value)
+        self.predicates.append(lambda r: _path(r, col) == value)
+        return self
+
+    def is_(self, col, value):
+        if value != "null":
+            raise NotImplementedError("offline double supports is_(col, 'null') only")
+        self.predicates.append(lambda r: r.get(col) is None)
+        return self
+
+    def update(self, values):
+        self.to_update = deepcopy(values)
         return self
 
     def neq(self, col, value):
@@ -65,6 +85,17 @@ class _Query:
 
     def _execute(self):
         rows = self.db.rows[self.name]
+        if self.to_update is not None:
+            if self.name != "applications" or set(self.to_update) - {"payload_json", "updated_at"}:
+                # Mirrors the server: only a draft's working payload is ever updated directly.
+                raise RuntimeError("unsupported update")
+            changed = []
+            for row in rows:
+                if all(p(row) for p in self.predicates):
+                    row.update(deepcopy(self.to_update))
+                    row["gstin_normalized"] = norm_id((row["payload_json"] or {}).get("gstin"))
+                    changed.append(deepcopy(row))
+            return SimpleNamespace(data=changed)
         if self.to_insert is None:
             matches = [deepcopy(r) for r in rows if all(p(r) for p in self.predicates)]
             if self.order_col:

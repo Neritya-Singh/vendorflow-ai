@@ -27,7 +27,7 @@ HIGH, MEDIUM, LOW = "HIGH", "MEDIUM", "LOW"
 RISK_ORDER = {HIGH: 0, MEDIUM: 1, LOW: 2, None: 3}
 
 # Rules whose FAIL the vendor can fix by typing or uploading.
-VENDOR_INPUT_RULES = ("R01", "R03", "R04", "R05", "R06", "R07")
+VENDOR_INPUT_RULES = ("R01", "R03", "R04", "R05", "R06", "R07", "R17")
 SWAPPED_MARKER = "opposite slots"
 
 VENDOR_STATUS_LABELS = {
@@ -101,10 +101,12 @@ def _document_items(message: str) -> list[dict]:
 
 _INPUT_TEXT = {
     "R03": ("PAN format", "Check your PAN. It should be 10 characters, like ABCDE1234F."),
-    "R04": ("GSTIN format", "Check your GSTIN. It should be 15 characters, like 27ABCDE1234F1Z5."),
+    "R04": ("GSTIN format", "Check your GSTIN. It should be 15 characters, like 27ABCDE1234F1Z0."),
     "R05": ("PAN does not match GSTIN", "Your PAN doesn't match the PAN inside your GSTIN. Check both numbers."),
     "R06": ("GSTIN state code", "Your GSTIN's state code doesn't match your business state. Check both."),
     "R07": ("IFSC format", "Check your IFSC. It should be 11 characters, like SBIN0001234."),
+    "R17": ("GSTIN check digit", "Check your GSTIN. Its last character doesn't match the rest of the number, "
+                                 "so one character is probably mistyped."),
 }
 
 
@@ -149,7 +151,8 @@ def vendor_items(run: dict | None) -> list[dict]:
             items.append({"key": rule, "short": short, "text": text})
     # Unconfirmed evidence is the vendor's to fix (clearer copy) unless it is only a
     # side effect of a missing/unreadable/swapped document or a provider outage.
-    if _failed(rules.get("R13")) and not document_problem and not extraction_outage(run):
+    if (_failed(rules.get("R13")) and not document_problem and not extraction_outage(run)
+            and not r13_covered_by_vendor_values(run)):
         items.append(_r13_item(rules["R13"]))
     return items
 
@@ -184,6 +187,8 @@ def team_flags(run: dict | None) -> list[dict]:
         flags.append(_flag("R09", MEDIUM, "Account number differs from the bank document"))
     if _failed(rules.get("R10")):
         flags.append(_flag("R10", MEDIUM, "IFSC differs from the bank document"))
+    if _failed(rules.get("R16")):
+        flags.append(_flag("R16", MEDIUM, str(rules["R16"].get("label") or "Vendor changed values from the documents")))
     if extraction_outage(run):
         flags.append(_flag("R14", LOW, "Document reading unavailable, re-run needed"))
     flags.sort(key=lambda f: RISK_ORDER[f["risk"]])
@@ -355,7 +360,8 @@ def linked_case_ids(run: dict | None) -> list[str]:
 def pipeline_options(registry) -> dict:
     """v2 policy hooks for ProcessingPipeline / PersistentVendorService."""
     from .rules import norm_legal_name
-    return {"screening": records_screening(registry), "name_key": norm_legal_name}
+    return {"screening": records_screening(registry), "name_key": norm_legal_name,
+            "evidence_checks": evidence_checks}
 
 
 # ---------------------------------------------------------------- B3 decisions
@@ -376,6 +382,7 @@ _FLAG_REQUESTS = {
     "R12": "Upload a recent letter from your bank confirming that this account belongs to your business.",
     "R15": "Upload a recent letter from your bank confirming that this account belongs to your business.",
     "R14": "Submit your application again so we can read your documents.",
+    "R16": "Check the details you changed or typed in against your documents, or upload a clearer copy that shows them.",
 }
 
 
@@ -425,7 +432,7 @@ def reason_categories(run: dict | None) -> set[str]:
         rule = flag["rule_id"]
         if rule == "R11":
             found.add("Name differs from bank holder")
-        elif rule in {"R08", "R09", "R10"}:
+        elif rule in {"R08", "R09", "R10", "R16"}:
             found.add("Value differs from document")
         elif rule in {"R12", "R15"}:
             found.add("Duplicate or bank reuse")
@@ -439,3 +446,143 @@ def run_outcome_label(run: dict | None) -> str:
     if (run or {}).get("status") == "APPROVED":
         return "Approved"
     return "Waiting on vendor" if vendor_items(run) else "Sent to team"
+
+
+# ---------------------------------------------------------------- B5 upload-first evidence
+# V2_01 §5–6: values are pre-filled from the documents. A value the vendor changed,
+# or typed because it was not found on a document that WAS read, is kept, flagged
+# and decided by the team (both values shown). GSTIN check digit (owner decision 5).
+
+_GSTIN_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def gstin_check_digit_ok(gstin: str) -> bool | None:
+    """Standard GSTIN mod-36 checksum. None when the GSTIN is not structurally valid."""
+    from .rules import GSTIN_PATTERN, norm_id
+    value = norm_id(gstin)
+    if not GSTIN_PATTERN.fullmatch(value):
+        return None
+    total = 0
+    for index, char in enumerate(value[:14]):
+        product = _GSTIN_CHARS.index(char) * (2 if index % 2 else 1)
+        total += product // 36 + product % 36
+    return _GSTIN_CHARS[(36 - total % 36) % 36] == value[14]
+
+
+def _digits(value) -> str:
+    return re.sub(r"[\s-]+", "", str(value or ""))
+
+
+# (field, vendor label, staff label, document, extracted key, R13 label)
+PROVENANCE_FIELDS = (
+    ("legal_name", "Legal name", "Legal name", "GST", "legal_name", "GST legal name"),
+    ("gstin", "GSTIN", "GSTIN", "GST", "gstin", "GSTIN"),
+    ("business_state", "State", "State", "GST", "state", "GST state"),
+    ("bank_holder", "Account holder", "Account holder", "BANK", "holder_name", "Bank account holder"),
+    ("account_number", "Account number", "Account number", "BANK", "account_number", "Bank account number"),
+    ("ifsc", "IFSC", "IFSC", "BANK", "ifsc", "Bank IFSC"),
+)
+_DOC_KEYS = {"GST": ("legal_name", "gstin", "state"), "BANK": ("holder_name", "account_number", "ifsc")}
+
+
+def _same(field: str, a, b) -> bool:
+    from .rules import norm_id, norm_legal_name, norm_state
+    if field in ("gstin", "ifsc"):
+        return norm_id(a) == norm_id(b)
+    if field == "account_number":
+        return _digits(a) == _digits(b)
+    if field == "business_state":
+        return norm_state(a) == norm_state(b)
+    return norm_legal_name(a) == norm_legal_name(b)  # "Pvt Ltd" == "Private Limited" (B2)
+
+
+def document_was_read(extracted: dict | None, doc: str) -> bool:
+    """A document counts as read when at least one of its fields was extracted."""
+    part = (extracted or {}).get("gst" if doc == "GST" else "bank") or {}
+    return any(str(part.get(key) or "").strip() for key in _DOC_KEYS[doc])
+
+
+def field_provenance(values: dict, extracted: dict | None) -> list[dict]:
+    """Per field: document | edited | vendor (not on a read document) | missing | unread."""
+    rows = []
+    for field, label, staff, doc, key, _r13 in PROVENANCE_FIELDS:
+        part = (extracted or {}).get("gst" if doc == "GST" else "bank") or {}
+        doc_value = str(part.get(key) or "").strip()
+        value = str((values or {}).get(field) or "").strip()
+        if not document_was_read(extracted, doc):
+            status = "unread"
+        elif doc_value and value:
+            status = "document" if _same(field, value, doc_value) else "edited"
+        elif doc_value:
+            status = "missing"
+        else:
+            status = "vendor" if value else "missing"
+        rows.append({"field": field, "label": label, "staff_label": staff, "document": doc,
+                     "value": value, "document_value": doc_value or None, "status": status})
+    return rows
+
+
+def _mask(field: str, value) -> str:
+    text = str(value or "")
+    if field == "account_number":
+        digits = _digits(text)
+        return "••••" + digits[-4:] if digits else ""
+    return text
+
+
+def evidence_checks(v, extracted) -> list:
+    """Pipeline hook (ProcessingPipeline(evidence_checks=...)): R16 and R17."""
+    from .models import CheckResult, CheckState
+    values = v.model_dump() if hasattr(v, "model_dump") else dict(v)
+    data = extracted.model_dump() if hasattr(extracted, "model_dump") else dict(extracted or {})
+    rows = field_provenance(values, data)
+    edited = [r for r in rows if r["status"] == "edited"]
+    typed = [r for r in rows if r["status"] == "vendor"]
+    unread = any(r["status"] == "unread" for r in rows)
+    parts = [f"{r['staff_label']}: changed by vendor (document {_mask(r['field'], r['document_value'])!r}; "
+             f"vendor {_mask(r['field'], r['value'])!r})" for r in edited]
+    parts += [f"{r['staff_label']}: entered by vendor, not on document ({_mask(r['field'], r['value'])!r})"
+              for r in typed]
+    if edited or typed:
+        label = ("Vendor changed and entered values not on the documents" if edited and typed
+                 else "Vendor changed a value from the documents" if edited
+                 else "Vendor entered a value not on the documents")
+        state, detail = CheckState.FAIL, "; ".join(parts) + "."
+    elif unread:
+        label, state = "Document values not compared", CheckState.UNKNOWN
+        detail = "A document was not read, so entered values could not be compared with it."
+    else:
+        label, state, detail = "All values come from the documents", CheckState.PASS, ""
+    r16 = CheckResult(rule_id="R16", state=state, code="VENDOR_VALUES", label=label,
+                      vendor_message=("Our team will compare the details you changed or entered with your documents."
+                                      if state == CheckState.FAIL else "Details taken from your documents."),
+                      admin_detail=detail, next_action="Compare the vendor's values with the documents")
+    digit = gstin_check_digit_ok(values.get("gstin") or "")
+    r17 = CheckResult(rule_id="R17", state=CheckState.UNKNOWN if digit is None else
+                      (CheckState.PASS if digit else CheckState.FAIL),
+                      code="GSTIN_CHECK_DIGIT", label="GSTIN check digit",
+                      vendor_message=("GSTIN check digit valid." if digit else
+                                      "Check your GSTIN. Its last character doesn't match the rest of the number."
+                                      if digit is False else "GSTIN check digit waits for a valid GSTIN."),
+                      next_action="Correct GSTIN")
+    # UNKNOWN only when R04 already fails; keep R17 out of the decision in that case.
+    return [r16, r17] if digit is not None else [r16, r17.model_copy(update={"state": CheckState.PASS,
+            "vendor_message": "GSTIN check digit not checked (GSTIN format already flagged)."})]
+
+
+def r13_covered_by_vendor_values(run: dict | None) -> bool:
+    """True when every R13 issue is a field the vendor typed because it was not found
+    on a document we DID read. Those go to the team (flagged by R16), not back to the vendor."""
+    r13 = _by_rule(run).get("R13")
+    if not _failed(r13) or not _failed(_by_rule(run).get("R16")):
+        return False
+    message = str(r13.get("vendor_message") or "")
+    found = re.search(r"evidence: (.*)\.$", message)
+    if not found or "not supported by PDF" in message:
+        return False
+    issues = [part.strip() for part in found.group(1).split(",") if part.strip()]
+    rows = {r[5]: r[0] for r in PROVENANCE_FIELDS}
+    typed = {r["field"] for r in field_provenance((run or {}).get("payload_json") or {},
+                                                   (run or {}).get("extracted_json") or {})
+             if r["status"] == "vendor"}
+    return bool(issues) and all(rows.get(issue) in typed for issue in issues)

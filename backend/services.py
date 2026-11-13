@@ -6,6 +6,7 @@ import threading
 from vendorflow import v2_policy as v2
 from vendorflow.gemini_extractor import GeminiExtractor
 from vendorflow.persistence import PersistentVendorService, SupabaseRepository
+from vendorflow.v2_intake import DraftService
 
 from .config import Settings
 from .offline import InMemorySupabase, OfflineLabelExtractor
@@ -38,3 +39,8 @@ class ServiceProvider:
         # v2 policy hooks: records screening across all statuses + bank reuse, and
         # legal-suffix name equivalence for the GST name vs bank holder check.
         return PersistentVendorService(repo, self.extractor(), pipeline_options=v2.pipeline_options(repo))
+
+    def drafts(self) -> DraftService:
+        """B5 upload-first drafts: one provider call per file, reused on submit."""
+        repo = self.repo()
+        return DraftService(repo, self.extractor, pipeline_options=v2.pipeline_options(repo))

@@ -32,6 +32,7 @@ from vendorflow.persistence import (
 from vendorflow.pipeline import MinimumIntakeError
 from vendorflow.rules import GST_STATE_CODES, normalize_submission
 from vendorflow.ux_support import committed_pdf_types
+from vendorflow.v2_intake import DraftInvalid, DraftLimit, DraftSubmitted, V2Submission, draft_view
 
 from . import presenters
 from .config import Settings, load_settings
@@ -53,6 +54,21 @@ PDF_MIME = {"application/pdf", "application/x-pdf"}
 class Credentials(BaseModel):
     application_id: str = Field(max_length=32)
     tracking_code: str = Field(max_length=80)
+
+
+class DraftValues(Credentials):
+    changes: dict[str, str] = Field(default_factory=dict, max_length=12)
+    reset: list[str] = Field(default_factory=list, max_length=12)
+    contact: dict[str, str] | None = None
+    declaration: bool | None = None
+
+
+class DraftSlot(Credentials):
+    slot: Literal["GST", "BANK"]
+
+
+class DraftSubmit(Credentials):
+    declaration: bool = False
 
 
 class Login(BaseModel):
@@ -77,6 +93,8 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
     app.state.trust_proxy = os.getenv("TRUST_PROXY", "").strip() == "1"
     admin_throttle = LoginThrottle()
     vendor_limiter = SlidingWindowLimiter(limit=10, window_seconds=15 * 60)
+    # Each upload/move can cost one provider call: bound them per client (B5).
+    reading_limiter = SlidingWindowLimiter(limit=40, window_seconds=15 * 60)
 
     # ------------------------------------------------------------ middleware
     @app.middleware("http")
@@ -100,6 +118,12 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
 
     # ------------------------------------------------------------ helpers
     def safe_error(exc: Exception) -> tuple[int, str, str]:
+        if isinstance(exc, DraftSubmitted):
+            return 409, "SUBMITTED", str(exc)
+        if isinstance(exc, DraftLimit):
+            return 429, "LIMIT", str(exc)
+        if isinstance(exc, DraftInvalid):
+            return 400, "INVALID", str(exc)
         if isinstance(exc, UnauthorizedTracking):
             return 401, "UNAUTHORIZED", "Application ID or tracking code is incorrect."
         if isinstance(exc, TerminalApplication):
@@ -166,7 +190,8 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             # Vendor stream: real stage IDs, states and times only. Internal notes
             # (provider diagnostics, screening outcomes) stay in the saved run for staff.
             events.put({"type": "stage", **event.model_dump(mode="json"), "note": "",
-                        "label": presenters.VENDOR_STAGES.get(event.stage_id, "")})
+                        "label": presenters.VENDOR_STAGES.get(event.stage_id)
+                        or presenters.READING_STAGES.get(event.stage_id, "")})
 
         def worker() -> None:
             try:
@@ -319,6 +344,12 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
                          and normalize_submission(vendor) == normalize_submission(saved))
             if not (v2.extraction_outage(latest_run) and unchanged):
                 raise HTTPException(409, "Your application is with our team. No changes are needed from you right now.")
+        saved_payload = record.get("payload_json") or {}
+        if saved_payload.get("intake") == "upload_first":
+            vendor = V2Submission(**vendor.model_dump(), contact_phone=str(saved_payload.get("contact_phone") or ""),
+                                  address=str(saved_payload.get("address") or ""),
+                                  declaration=bool(saved_payload.get("declaration")),
+                                  declared_at=str(saved_payload.get("declared_at") or ""))
         service = provider.service()
 
         def work(callback):
@@ -328,6 +359,113 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             fresh, runs = service.track(application_id, tracking_code)
             return presenters.vendor_view(fresh, runs, service.repo.review_history(application_id),
                                           buyer=settings.workspace_name)
+
+        return stream(work)
+
+    # ------------------------------------------------------------ vendor drafts (B5)
+    # Upload-first intake. The ID + tracking code from /api/vendor/intake identify the
+    # draft; the first upload creates it. Every call re-checks the code server-side.
+
+    def draft_auth(request: Request, application_id: str, tracking_code: str, *, create: bool = False) -> None:
+        application_id = (application_id or "").strip().upper()
+        check_credentials(application_id, tracking_code)
+        try:
+            exists = bool(provider.repo().client.table("applications").select("id")
+                          .eq("id", application_id).limit(1).execute().data)
+        except Exception as exc:
+            raise fail(exc) from None
+        if exists:
+            vendor_auth(request, application_id, tracking_code)
+        elif create:
+            try:
+                provider.drafts().create_draft(application_id, tracking_code)
+            except Exception as exc:
+                raise fail(exc) from None
+        else:
+            vendor_auth(request, application_id, tracking_code)  # counts as a failed lookup
+
+    def reading_budget(request: Request) -> None:
+        key = client_key(request)
+        if reading_limiter.blocked(key):
+            raise HTTPException(429, "Too many uploads in a short time. Wait a few minutes and try again.")
+        reading_limiter.hit(key)
+
+    def drafts_view(application_id: str, draft: dict) -> dict:
+        return draft_view(application_id, draft, buyer=settings.workspace_name)
+
+    @app.post("/api/vendor/draft")
+    def open_draft(request: Request, body: Credentials):
+        application_id = body.application_id.strip().upper()
+        draft_auth(request, application_id, body.tracking_code.strip())
+        try:
+            return drafts_view(application_id, provider.drafts().draft(application_id))
+        except Exception as exc:
+            raise fail(exc) from None
+
+    @app.post("/api/vendor/draft/files")
+    async def upload_draft_file(
+        request: Request, application_id: str = Form(...), tracking_code: str = Form(...),
+        slot: Literal["GST", "BANK"] = Form(...), file: UploadFile = File(...),
+    ):
+        application_id = application_id.strip().upper()
+        pdf = await read_upload(file, "GST certificate" if slot == "GST" else "Bank document")
+        if pdf is None:
+            raise HTTPException(400, "Choose a file to upload.")
+        draft_auth(request, application_id, tracking_code, create=True)
+        reading_budget(request)
+        service = provider.drafts()
+        return stream(lambda callback: drafts_view(application_id, service.add_file(application_id, slot, pdf, callback)))
+
+    @app.post("/api/vendor/draft/move")
+    def move_draft_file(request: Request, body: DraftSlot):
+        application_id = body.application_id.strip().upper()
+        draft_auth(request, application_id, body.tracking_code.strip())
+        reading_budget(request)
+        service = provider.drafts()
+        return stream(lambda callback: drafts_view(application_id, service.move_file(application_id, body.slot, callback)))
+
+    @app.post("/api/vendor/draft/remove")
+    def remove_draft_file(request: Request, body: DraftSlot):
+        application_id = body.application_id.strip().upper()
+        draft_auth(request, application_id, body.tracking_code.strip())
+        try:
+            return drafts_view(application_id, provider.drafts().remove_file(application_id, body.slot))
+        except Exception as exc:
+            raise fail(exc) from None
+
+    @app.put("/api/vendor/draft/values")
+    def save_draft_values(request: Request, body: DraftValues):
+        application_id = body.application_id.strip().upper()
+        draft_auth(request, application_id, body.tracking_code.strip())
+        try:
+            draft = provider.drafts().save_values(application_id, changes=body.changes, reset=body.reset,
+                                                  contact=body.contact, declaration=body.declaration)
+            return drafts_view(application_id, draft)
+        except Exception as exc:
+            raise fail(exc) from None
+
+    @app.post("/api/vendor/draft/submit")
+    def submit_draft(request: Request, body: DraftSubmit):
+        application_id = body.application_id.strip().upper()
+        tracking_code = body.tracking_code.strip()
+        draft_auth(request, application_id, tracking_code)
+        service = provider.drafts()
+        try:
+            if body.declaration:
+                service.save_values(application_id, declaration=True)
+            elif not service.repo._application(application_id).get("latest_run_id"):
+                raise DraftInvalid("Confirm that these details are correct and belong to your business.")
+        except DraftSubmitted:
+            pass  # already submitted: the worker returns the saved result
+        except Exception as exc:
+            raise fail(exc) from None
+
+        def work(callback):
+            result = service.submit(application_id, callback)
+            saved = service.repo.runs_for_application(application_id)
+            run = next((r for r in saved if r.get("id") == result.run_id), {})
+            return presenters.receipt_view(application_id, result, run.get("payload_json") or {},
+                                           run.get("document_manifest") or [], buyer=settings.workspace_name)
 
         return stream(work)
 

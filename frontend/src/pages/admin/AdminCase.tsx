@@ -160,7 +160,11 @@ function ComparedValues({ c }: { c: Case }) {
               return (
                 <tr key={row.Field} className={cx("border-t border-[#F2F4F7]", bad && "bg-[#FEF3F2]", row.Kind === "missing" && "bg-[#FFFAEB]")}>
                   <th scope="row" className={cx("py-2 text-left", bad ? "pl-2 font-semibold text-[#B42318]" : "font-medium text-[#344054]")}>{row.Field.replace(" (masked)", "")}</th>
-                  <td className="px-2 py-2">{shown.Submitted}</td>
+                  <td className="px-2 py-2">
+                    {shown.Submitted}
+                    {c.provenance?.[i]?.status === "edited" ? <span className="ml-1.5 rounded-full bg-[#FEF0C7] px-2 py-0.5 text-[11px] font-semibold text-[#93370D]">Changed by vendor</span> : null}
+                    {c.provenance?.[i]?.status === "vendor" ? <span className="ml-1.5 rounded-full bg-[#FEF0C7] px-2 py-0.5 text-[11px] font-semibold text-[#93370D]">Entered by vendor, not on document</span> : null}
+                  </td>
                   <td className="py-2">
                     {shown["From PDF"]}{" "}
                     {row.Kind === "ok" ? <span className="text-teal-700" aria-label="Consistent">✓</span> : <span className="text-xs font-semibold text-[#B42318]">{row.Assessment}</span>}

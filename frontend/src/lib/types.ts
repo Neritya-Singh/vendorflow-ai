@@ -244,7 +244,10 @@ export interface AdminCase {
   latest_run_id: string | null;
   created_at: string | null;
   updated_at: string | null;
-  contact: { name: string; email: string; state: string };
+  contact: { name: string; email: string; phone: string; state: string };
+  declared: boolean;
+  /** B5: same order as `comparison`. "edited" = vendor changed it; "vendor" = typed, not on the document. */
+  provenance: { field: string; label: string; status: "document" | "edited" | "vendor" | "missing" | "unread" }[];
   reasons: string[];
   owner: Owner;
   owner_label: string;

@@ -53,10 +53,10 @@ def test_H01_bank_account_substring_never_autoapproves(truncated):
 
 
 @pytest.mark.parametrize("gstin", [
-    "09ABCDE 1234F1Z5",
-    " 09ABCDE1234F1Z5 ",
-    "09abcde1234f1z5",
-    "09ABCDE\t1234F1Z5",
+    "09ABCDE 1234F1ZY",
+    " 09ABCDE1234F1ZY ",
+    "09abcde1234f1zy",
+    "09ABCDE\t1234F1ZY",
 ])
 def test_H02_approved_registry_uses_canonical_gstin(gstin):
     db = FakeSupabase()
@@ -69,7 +69,7 @@ def test_H02_approved_registry_uses_canonical_gstin(gstin):
         "A second application with the same canonical GSTIN must never "
         "be automatically approved."
     )
-    assert db.rows["applications"][0]["gstin_normalized"] == "09ABCDE1234F1Z5", (
+    assert db.rows["applications"][0]["gstin_normalized"] == "09ABCDE1234F1ZY", (
         "The current FakeSupabase must eventually implement the same "
         "canonicalization as the PostgreSQL schema."
     )
