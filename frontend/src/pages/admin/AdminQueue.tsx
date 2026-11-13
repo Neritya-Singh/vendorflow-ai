@@ -339,18 +339,3 @@ export function AdminActivity() {
     </div>
   );
 }
-
-// ---------------------------------------------------------------- Invites (B9)
-
-export function AdminInvites() {
-  return (
-    <section className="flex flex-1 flex-col items-center justify-center rounded-[20px] border border-line bg-white px-6 py-16 text-center">
-      <h1 className="text-lg font-bold text-ink">Invites</h1>
-      <p className="mt-1 max-w-md text-sm text-muted">
-        Inviting vendors by link is planned for a later release. Until then, vendors start at the supplier portal and use their
-        application ID and private tracking code to come back.
-      </p>
-      <Button className="mt-4" disabled icon={Inbox}>Invite vendor</Button>
-    </section>
-  );
-}

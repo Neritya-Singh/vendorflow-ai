@@ -5,7 +5,7 @@ import { TrackPage } from "./pages/TrackPage";
 import { VendorHome } from "./pages/VendorHome";
 import { AdminCase } from "./pages/admin/AdminCase";
 import { AdminLayout } from "./pages/admin/AdminLayout";
-import { AdminActivity, AdminInvites, AdminOverview, AdminQueue } from "./pages/admin/AdminQueue";
+import { AdminActivity, AdminOverview, AdminQueue } from "./pages/admin/AdminQueue";
 import { AppStateProvider } from "./state";
 
 function NotFound() {
@@ -27,7 +27,6 @@ export function App() {
           <Route path="/admin" element={<AdminLayout />}>
             <Route index element={<AdminQueue />} />
             <Route path="overview" element={<AdminOverview />} />
-            <Route path="invites" element={<AdminInvites />} />
             <Route path="activity" element={<AdminActivity />} />
             <Route path="cases/:id" element={<AdminCase />} />
           </Route>

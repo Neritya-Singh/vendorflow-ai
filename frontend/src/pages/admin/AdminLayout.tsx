@@ -1,4 +1,4 @@
-import { CheckCircle2, Lock, LogOut, Plus, Search, ShieldCheck } from "lucide-react";
+import { CheckCircle2, Lock, LogOut, Search, ShieldCheck } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { BootErrorBanner } from "../../components/AppShell";
@@ -80,7 +80,6 @@ function Login({ onDone, configured }: { onDone: () => void; configured: boolean
 const NAV = [
   { to: "/admin/overview", label: "Overview" },
   { to: "/admin", label: "Applications", end: true, also: "/admin/cases" },
-  { to: "/admin/invites", label: "Invites" },
   { to: "/admin/activity", label: "Activity" },
 ];
 
@@ -217,7 +216,6 @@ export function AdminLayout() {
             </Link>
             <TopNav />
             <HeaderSearch />
-            <Button disabled title="Vendor invites arrive in a later release" icon={Plus}>Invite vendor</Button>
             <div className="flex items-center gap-2">
               <span aria-label="Signed in as reviewer" className="grid size-9 place-items-center rounded-full bg-navy-100 text-[13px] font-semibold text-navy-800">RV</span>
               <Button variant="ghost" size="sm" icon={LogOut} onClick={signOut}>Sign out</Button>
