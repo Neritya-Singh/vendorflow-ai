@@ -1,5 +1,5 @@
 import type {
-  AdminCase, ComparisonRow, Contact, Credentials, DraftFieldKey, DraftStreamMessage, DraftView, Health, Meta, Overview,
+  AdminCase, ComparisonRow, Contact, Credentials, DraftFieldKey, DraftStreamMessage, DraftView, FixView, Health, Meta, Overview,
   Slot, StreamMessage, VendorFields, VendorView,
 } from "./types";
 
@@ -54,6 +54,10 @@ export const api = {
     creds: Credentials,
     body: { changes?: Partial<Record<DraftFieldKey, string>>; reset?: DraftFieldKey[]; contact?: Contact; declaration?: boolean },
   ) => request<DraftView>("/api/vendor/draft/values", { method: "PUT", body: JSON.stringify({ ...creds, ...body }) }),
+  openFix: (creds: Credentials) =>
+    request<FixView>("/api/vendor/fix", { method: "POST", body: JSON.stringify(creds) }),
+  saveFix: (creds: Credentials, body: { changes?: Partial<Record<DraftFieldKey, string>>; reset?: DraftFieldKey[]; contact?: Contact }) =>
+    request<FixView>("/api/vendor/fix/values", { method: "PUT", body: JSON.stringify({ ...creds, ...body }) }),
   removeDraftFile: (creds: Credentials, slot: Slot) =>
     request<DraftView>("/api/vendor/draft/remove", { method: "POST", body: JSON.stringify({ ...creds, slot }) }),
 
@@ -71,7 +75,7 @@ export const api = {
     request<{ rows: ComparisonRow[] }>(`/api/admin/applications/${encodeURIComponent(id)}/reveal`),
   review: (
     id: string,
-    body: { action: string; reason: string; expected_revision: number; expected_latest_run_id: string; confirmation?: string },
+    body: { action: string; reason: string; expected_revision: number; expected_latest_run_id: string; confirmation?: string; items?: string[] },
   ) =>
     request<AdminCase>(`/api/admin/applications/${encodeURIComponent(id)}/review`, {
       method: "POST",
@@ -160,17 +164,22 @@ export async function streamRequest<M>(
   if (buffer.trim()) onMessage(JSON.parse(buffer) as M);
 }
 
-export function uploadDraftFile(creds: Credentials, slot: Slot, file: File, onMessage: (m: DraftStreamMessage) => void) {
+/** Draft (before submit) or fix (after submit): the same reading endpoints under two bases. */
+export type ReadingBase = "/api/vendor/draft" | "/api/vendor/fix";
+
+export function uploadDraftFile(creds: Credentials, slot: Slot, file: File, onMessage: (m: DraftStreamMessage) => void,
+  base: ReadingBase = "/api/vendor/draft") {
   const form = new FormData();
   form.set("application_id", creds.application_id);
   form.set("tracking_code", creds.tracking_code);
   form.set("slot", slot);
   form.set("file", file, file.name);
-  return streamRequest<DraftStreamMessage>("/api/vendor/draft/files", { method: "POST", body: form }, onMessage);
+  return streamRequest<DraftStreamMessage>(`${base}/files`, { method: "POST", body: form }, onMessage);
 }
 
-export function moveDraftFile(creds: Credentials, slot: Slot, onMessage: (m: DraftStreamMessage) => void) {
-  return streamRequest<DraftStreamMessage>("/api/vendor/draft/move", {
+export function moveDraftFile(creds: Credentials, slot: Slot, onMessage: (m: DraftStreamMessage) => void,
+  base: ReadingBase = "/api/vendor/draft") {
+  return streamRequest<DraftStreamMessage>(`${base}/move`, {
     method: "POST", body: JSON.stringify({ ...creds, slot }),
   }, onMessage);
 }
@@ -179,4 +188,8 @@ export function submitDraft(creds: Credentials, onMessage: (m: StreamMessage) =>
   return streamRequest<StreamMessage>("/api/vendor/draft/submit", {
     method: "POST", body: JSON.stringify({ ...creds, declaration: true }),
   }, onMessage);
+}
+
+export function submitFix(creds: Credentials, onMessage: (m: StreamMessage) => void) {
+  return streamRequest<StreamMessage>("/api/vendor/fix/submit", { method: "POST", body: JSON.stringify(creds) }, onMessage);
 }

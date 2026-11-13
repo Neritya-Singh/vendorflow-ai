@@ -41,6 +41,8 @@ Retrying with the same credentials is idempotent.
 | `POST /api/vendor/applications` (multipart) | new ID, or the existing ID **plus its tracking code** |
 | `POST /api/vendor/track` | ID + tracking code (throttled: 10 failures / 15 min / client) |
 | `POST /api/vendor/resubmit` (multipart) | ID + tracking code + expected revision/run |
+| `POST /api/vendor/draft`, `/draft/files`, `/draft/move`, `/draft/remove`, `PUT /draft/values`, `POST /draft/submit` | ID + tracking code; upload-first draft (no runs yet) |
+| `POST /api/vendor/fix`, `/fix/files`, `/fix/move`, `PUT /fix/values`, `POST /fix/submit` | ID + tracking code; only while the case is waiting on the vendor. Shows only the requested items; re-check reuses every reading |
 | `POST/GET/DELETE /api/admin/session` | password → signed HttpOnly SameSite=Strict cookie; 5 failures → 15-min lock |
 | `GET /api/admin/overview`, `/applications/{id}`, `/applications/{id}/reveal` | admin cookie |
 | `GET /api/admin/applications/{id}/runs/{run}/documents/{GST\|BANK}` | admin cookie; streams the hash-verified committed PDF, `no-store` |

@@ -183,7 +183,7 @@ function ComparedValues({ c }: { c: Case }) {
 type HistoryItem =
   | { kind: "run"; at: string | null; run: RunDetail }
   | { kind: "message"; at: string | null; title: string; text: string; source: string }
-  | { kind: "review"; at: string | null; label: string; reason: string; confirmation: string | null; actor: string };
+  | { kind: "review"; at: string | null; label: string; reason: string; confirmation: string | null; requested: string[]; actor: string };
 
 function RunDetails({ run, appId }: { run: RunDetail; appId: string }) {
   return (
@@ -217,7 +217,7 @@ function ChecksAndHistory({ c, className }: { c: Case; className?: string }) {
     const items: HistoryItem[] = [
       ...c.runs.map((run) => ({ kind: "run" as const, at: run.created_at, run })),
       ...c.messages.map((m) => ({ kind: "message" as const, at: m.at, title: m.title, text: m.text, source: m.source })),
-      ...c.reviews.map((r) => ({ kind: "review" as const, at: r.created_at, label: r.label, reason: r.reason, confirmation: r.confirmation, actor: r.actor })),
+      ...c.reviews.map((r) => ({ kind: "review" as const, at: r.created_at, label: r.label, reason: r.reason, confirmation: r.confirmation, requested: r.requested ?? [], actor: r.actor })),
     ];
     // Newest first; at equal times show the action, then its message, then the run.
     const order = { review: 0, message: 1, run: 2 };
@@ -278,6 +278,7 @@ function ChecksAndHistory({ c, className }: { c: Case; className?: string }) {
                   <span>
                     <span className="font-medium text-ink">{item.label}</span> · “{item.reason}”
                     {item.confirmation ? <span className="block text-xs text-teal-700">✓ {item.confirmation}</span> : null}
+                    {item.requested.length ? <span className="block text-xs text-navy-700">Asked for: {item.requested.join(", ")}</span> : null}
                   </span>
                 )}
               </div>

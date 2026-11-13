@@ -162,6 +162,8 @@ export interface ReviewRecord {
   label: string;
   reason: string;
   confirmation: string | null;
+  /** Items a correction request asked for, as reviewer labels. */
+  requested?: string[];
   actor: string;
   reviewed_run_id: string | null;
   created_at: string | null;
@@ -263,6 +265,8 @@ export interface AdminCase {
   linked_records: LinkedRecord[];
   messages: VendorMessage[];
   correction_draft: string;
+  correction_items: { id: FixItemId; label: string }[];
+  suggested_items: FixItemId[];
   requires_confirmation: boolean;
   confirmation_text: string;
   can_review: boolean;
@@ -293,6 +297,9 @@ export interface DraftFile {
   suggested_slot: Slot | null;
   pages: number | null;
   uploaded_at: string | null;
+  /** Fix page only: the document already used in the latest check (not a new upload). */
+  on_file?: boolean;
+  version?: number | null;
 }
 
 export interface DraftField {
@@ -314,7 +321,7 @@ export interface Contact {
 
 export interface DraftView {
   application_id: string;
-  owner: "DRAFT";
+  owner: "DRAFT" | "VENDOR";
   buyer: string;
   /** Draft revision; parallel requests may answer out of order. */
   rev: number;
@@ -337,3 +344,18 @@ export type DraftStreamMessage =
   | StageEvent
   | { type: "result"; data: DraftView }
   | { type: "error"; status: number; kind: string; message: string };
+
+// ---------------------------------------------------------------- B7 fix items
+export type FixItemId = `doc:${Slot}` | `field:${DraftFieldKey | "contact"}`;
+export type FixItem =
+  | { id: FixItemId; kind: "document"; slot: Slot; text: string }
+  | { id: FixItemId; kind: "field"; field: DraftFieldKey | "contact"; text: string };
+
+/** A submitted application being fixed: only the requested items are shown. */
+export interface FixView extends DraftView {
+  items: FixItem[];
+  show_slots: Slot[];
+  shown_fields: DraftFieldKey[];
+  show_contact: boolean;
+  ready: boolean;
+}

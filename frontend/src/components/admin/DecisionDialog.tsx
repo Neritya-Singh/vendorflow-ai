@@ -55,6 +55,7 @@ export function DecisionDialog({ c, action, onClose, onSaved, onUnauthorized, bu
   const def = action ? DECISIONS[action] : null;
   const [reason, setReason] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+  const [items, setItems] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ message: string; stale: boolean } | null>(null);
   const reasonId = useId();
@@ -63,11 +64,13 @@ export function DecisionDialog({ c, action, onClose, onSaved, onUnauthorized, bu
   useEffect(() => {
     if (!action) return;
     setReason(action === "REQUEST_CORRECTION" ? c.correction_draft : "");
+    setItems(action === "REQUEST_CORRECTION" ? c.suggested_items ?? [] : []);
     setConfirmed(false);
     setError(null);
-  }, [action, c.correction_draft]);
+  }, [action, c.correction_draft, c.suggested_items]);
 
-  const ready = reason.trim().length >= 3 && (!needsConfirmation || confirmed) && !!c.latest_run_id;
+  const correcting = action === "REQUEST_CORRECTION";
+  const ready = reason.trim().length >= 3 && (!needsConfirmation || confirmed) && !!c.latest_run_id && (!correcting || items.length > 0);
 
   const save = async () => {
     if (!action || !c.latest_run_id || !ready) return;
@@ -80,6 +83,7 @@ export function DecisionDialog({ c, action, onClose, onSaved, onUnauthorized, bu
         expected_revision: c.revision,
         expected_latest_run_id: c.latest_run_id,
         ...(needsConfirmation ? { confirmation: c.confirmation_text } : {}),
+        ...(correcting ? { items } : {}),
       });
       onSaved(next);
     } catch (e) {
@@ -133,6 +137,32 @@ export function DecisionDialog({ c, action, onClose, onSaved, onUnauthorized, bu
                   ))}
                 </div>
               </div>
+            ) : null}
+            {correcting ? (
+              <fieldset>
+                <legend className="text-[13px] font-medium text-slate-800">What should the vendor change?</legend>
+                <p className="mt-0.5 text-xs text-slate-500">The vendor sees only these: an upload slot for a document, the field for a value.</p>
+                <div className="mt-1.5 flex flex-wrap gap-1.5" data-items>
+                  {(c.correction_items ?? []).map((item) => {
+                    const on = items.includes(item.id);
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        aria-pressed={on}
+                        onClick={() => setItems((list) => (on ? list.filter((i) => i !== item.id) : [...list, item.id]))}
+                        className={cx(
+                          "rounded-full border px-3 py-1 text-[13px]",
+                          on ? "border-navy-600 bg-navy-600 font-semibold text-white" : "border-slate-300 bg-white text-slate-700 hover:border-navy-500",
+                        )}
+                      >
+                        {item.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {!items.length ? <p className="mt-1 text-xs font-medium text-amber-800">Choose at least one item.</p> : null}
+              </fieldset>
             ) : null}
             <div>
               <label htmlFor={reasonId} className="text-[13px] font-medium text-slate-800">{def?.reasonLabel}</label>

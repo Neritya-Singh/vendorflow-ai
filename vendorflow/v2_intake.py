@@ -220,7 +220,8 @@ def file_view(slot: str, file: dict | None, draft: dict) -> dict | None:
     else:
         message = _FILE_MESSAGES.get(status, "")
     return {"filename": file.get("filename"), "status": status, "message": message,
-            "suggested_slot": suggested, "pages": file.get("pages"), "uploaded_at": file.get("uploaded_at")}
+            "suggested_slot": suggested, "pages": file.get("pages"), "uploaded_at": file.get("uploaded_at"),
+            "on_file": bool(file.get("on_file")), "version": file.get("version")}
 
 
 def draft_view(application_id: str, draft: dict, *, buyer: str = "Zamp AI") -> dict:
@@ -276,8 +277,33 @@ def draft_view(application_id: str, draft: dict, *, buyer: str = "Zamp AI") -> d
         "declaration": bool(draft.get("declaration")),
         "documents_ready": not documents_blockers, "details_ready": not documents_blockers and not details_blockers,
         "blockers": documents_blockers + details_blockers,
+        "documents_blockers": documents_blockers, "details_blockers": details_blockers,
         "flagged": [r["key"] for r in fields if r["status"] in ("edited", "vendor")],
     }
+
+
+def fix_view(application_id: str, fix: dict, items: list[dict], *, buyer: str = "Zamp AI") -> dict:
+    """The vendor's fix page: only the requested items, each an upload slot or a field.
+    A requested document needs a NEW upload that we could read; a field that became
+    missing or invalid (for example after a new upload) is shown and blocks too."""
+    view = draft_view(application_id, fix, buyer=buyer)
+    doc_items = {i["slot"] for i in items if i["kind"] == "document"}
+    field_items = {i["field"] for i in items if i["kind"] == "field"}
+    blockers = []
+    for slot in SLOTS:
+        file = view["files"][slot]
+        if slot in doc_items and (not file or file["on_file"]):
+            blockers.append(f"Upload a new {DOC_WORDS[slot]}.")
+    blockers += [b for b in view["documents_blockers"] if b not in blockers]
+    shown = [f["key"] for f in view["fields"]
+             if f["key"] in field_items or not f["value"] or f["error"] or f["status"] == "unread"]
+    contact = "contact" in field_items or bool(view["contact_errors"]) \
+        or not all(view["contact"].get(k) for k in ("name", "email", "phone"))
+    blockers += view["details_blockers"]
+    view.update(owner=v2.VENDOR, items=items, shown_fields=shown, show_contact=contact,
+                show_slots=[s for s in SLOTS if s in doc_items or (view["files"][s] or {}).get("status") not in ("read", "unavailable")],
+                blockers=blockers, ready=not blockers)
+    return view
 
 
 # ---------------------------------------------------------------- service
@@ -316,23 +342,113 @@ class DraftService:
         payload = app.get("payload_json") or {}
         return deepcopy(payload.get("draft") or empty_draft())
 
-    def _mutate(self, application_id: str, change: Callable[[dict], None]) -> dict:
-        """Compare-and-swap on draft.rev so parallel uploads never lose each other's update."""
-        for _attempt in range(6):
+    def _load(self, application_id: str, kind: str) -> tuple[dict, dict, Callable]:
+        """(application row, working copy, compare-and-swap filter) for a draft or a fix."""
+        if kind == "draft":
             draft = self.draft(application_id)
+            rev = str(int(draft.get("rev") or 0))
+            return ({}, draft, lambda q: q.eq("payload_json->draft->>rev", rev).is_("latest_run_id", "null"))
+        app, run, _review = self._fix_context(application_id)
+        stored = (app.get("payload_json") or {}).get("fix")
+        if stored and stored.get("base_run_id") == app["latest_run_id"]:
+            fix = deepcopy(stored)
+        else:
+            fix = self._fresh_fix(application_id, app, run)
+        base = app["latest_run_id"]
+        if stored:
+            rev = str(int(stored.get("rev") or 0))
+            return app, fix, lambda q: q.eq("latest_run_id", base).eq("payload_json->fix->>rev", rev)
+        return app, fix, lambda q: q.eq("latest_run_id", base).is_("payload_json->fix", "null")
+
+    def _mutate(self, application_id: str, change: Callable[[dict], None], kind: str = "draft") -> dict:
+        """Compare-and-swap on the working copy's rev so parallel uploads never lose each other's update."""
+        for _attempt in range(6):
+            app, draft, guard = self._load(application_id, kind)
             rev = int(draft.get("rev") or 0)
             change(draft)
             draft["rev"] = rev + 1
-            response = (self.client.table("applications")
-                        .update({"payload_json": {"draft": draft}, "updated_at": _now()})
-                        .eq("id", application_id).eq("payload_json->draft->>rev", str(rev))
-                        .is_("latest_run_id", "null").execute())
+            if kind == "draft":
+                payload = {"draft": draft}
+            else:  # the submitted values stay as they are; the fix sits beside them
+                payload = {k: v for k, v in (app.get("payload_json") or {}).items() if k != "fix"}
+                payload["fix"] = draft
+            query = self.client.table("applications").update({"payload_json": payload, "updated_at": _now()})
+            response = guard(query.eq("id", application_id)).execute()
             if response.data:
                 return draft
         raise PersistenceError("Your application is being updated in another tab. Refresh and try again.")
 
     def _count_documents(self, application_id: str) -> int:
         return len(self.client.table("documents").select("id").eq("application_id", application_id).execute().data)
+
+    # --- fixes (B7 part 1): the vendor changes only the requested items of a SUBMITTED
+    # application. The fix lives in payload_json["fix"] beside the submitted values; the
+    # run trigger replaces the payload on re-check, which drops it. Nothing else changes.
+    def _fix_context(self, application_id: str) -> tuple[dict, dict, dict | None]:
+        app = self.repo._application(application_id)
+        if app.get("current_status") != "PENDING" or not app.get("latest_run_id"):
+            raise DraftSubmitted("This application has a final decision and can no longer be changed.")
+        runs = self.repo.runs_for_application(application_id)
+        reviews = self.repo.review_history(application_id)
+        run = runs[0] if runs else None
+        review = reviews[0] if reviews else None
+        if not run or run.get("id") != app["latest_run_id"]:
+            raise PersistenceError("Your application is being updated. Refresh and try again.")
+        if v2.case_owner(app, run, review) != v2.VENDOR:
+            raise DraftSubmitted("Your application is with our team. No changes are needed from you right now.")
+        return app, run, review
+
+    def _fresh_fix(self, application_id: str, app: dict, run: dict) -> dict:
+        """Working copy seeded from the latest run: its committed documents (with the
+        extraction that run already made, so re-check reuses it) and the submitted values."""
+        payload = run.get("payload_json") or {}
+        extracted = run.get("extracted_json") or {}
+        outage = v2.extraction_outage(run)
+        fix = empty_draft()
+        fix.update(base_run_id=app["latest_run_id"], doc_base=self._count_documents(application_id),
+                   declaration=bool(payload.get("declaration")), declared_at=str(payload.get("declared_at") or ""),
+                   contact={"name": str(payload.get("contact_name") or ""), "email": str(payload.get("contact_email") or ""),
+                            "phone": str(payload.get("contact_phone") or "")})
+        for item in run.get("document_manifest") or []:
+            slot = item.get("doc_type")
+            if slot not in SLOTS:
+                continue
+            row = self._own_document(application_id, str(item["id"]))
+            read = read_pdf(self.repo._download_verified(row))
+            fields = (extracted.get("gst" if slot == "GST" else "bank") or {})
+            kind = classify_document(read)
+            entry = {"document_id": str(row["id"]), "version": int(row["version"]), "filename": row.get("filename"),
+                     "sha256": row["file_sha256"], "pages": read.pages, "kind": kind,
+                     "uploaded_at": str(row.get("created_at") or ""), "on_file": True}
+            if not read.readable:
+                entry["status"] = "unreadable"
+            elif kind and kind != slot:
+                entry["status"] = "wrong_slot"
+            elif outage:
+                entry["status"] = "unavailable"  # not cached: re-check reads it again
+            else:
+                fix["cache"][f"{slot}:{row['file_sha256']}"] = {"text_sha": text_sha(read.text), "fields": dict(fields)}
+                entry["status"] = "read" if any(str(v or "").strip() for k, v in fields.items() if k != "address") \
+                    else "nothing_found"
+            fix["files"][slot] = entry
+        # What the vendor submitted stays; a value that differs from its document is an override.
+        view = extracted_view(fix)
+        for field in FIELDS:
+            value = str(payload.get(field) or "").strip()
+            doc_value = str(view["gst" if DOC_OF[field] == "GST" else "bank"].get(DOC_KEY[field]) or "")
+            if not (doc_value and value and v2._same(field, value, doc_value)) and (value or doc_value):
+                fix["overrides"][field] = value
+        return fix
+
+    def fix(self, application_id: str) -> tuple[dict, list[dict]]:
+        """(working copy, requested items). Opening it stores nothing."""
+        app, fix, _guard = self._load(application_id, "fix")
+        _app, run, review = self._fix_context(application_id)
+        return fix, v2.fix_items(run, review)
+
+    def fix_items(self, application_id: str) -> list[dict]:
+        _app, run, review = self._fix_context(application_id)
+        return v2.fix_items(run, review)
 
     # --- files
     def _extract_one(self, slot: str, text: str) -> dict:
@@ -341,9 +457,9 @@ class DraftService:
         return (out.gst if slot == "GST" else out.bank).model_dump()
 
     def _process(self, application_id: str, slot: str, pdf: PDFInput, read: ReadPDF, cache: dict,
-                 emit: Callable[[str, str, str], None]) -> tuple[dict, dict]:
+                 emit: Callable[[str, str, str], None], doc_base: int = 0) -> tuple[dict, dict]:
         """Store, identify and read ONE file for `slot`. Returns (file entry, new cache entries)."""
-        if self._count_documents(application_id) >= MAX_DRAFT_DOCUMENTS:
+        if self._count_documents(application_id) - doc_base >= MAX_DRAFT_DOCUMENTS:
             raise DraftLimit("Too many uploads for this application. Contact the finance team if you need help.")
         emit("U1", "STARTED", "")
         row = self.repo.upload_document(application_id, slot, pdf)
@@ -380,7 +496,7 @@ class DraftService:
         return entry, new_cache
 
     def _place(self, application_id: str, placements: list[tuple[str, dict]], cache: dict,
-               clear: tuple[str, str] | None = None) -> dict:
+               clear: tuple[str, str] | None = None, kind: str = "draft") -> dict:
         def change(draft: dict) -> None:
             draft.setdefault("cache", {}).update(cache)
             if clear and (draft["files"].get(clear[0]) or {}).get("document_id") == clear[1]:
@@ -395,22 +511,23 @@ class DraftService:
                 for field in FIELDS:
                     if DOC_OF[field] == slot:
                         draft["overrides"].pop(field, None)
-        return self._mutate(application_id, change)
+        return self._mutate(application_id, change, kind)
 
     def add_file(self, application_id: str, slot: str, pdf: PDFInput,
-                 stage_callback: StageCallback | None = None) -> dict:
+                 stage_callback: StageCallback | None = None, kind: str = "draft") -> dict:
         if slot not in SLOTS:
             raise DraftInvalid("Unknown document slot.")
-        draft = self.draft(application_id)
+        _app, draft, _guard = self._load(application_id, kind)
         entry, cache = self._process(application_id, slot, pdf, read_pdf(pdf), draft.get("cache") or {},
-                                     _emitter(stage_callback))
-        return self._place(application_id, [(slot, entry)], cache)
+                                     _emitter(stage_callback), int(draft.get("doc_base") or 0))
+        return self._place(application_id, [(slot, entry)], cache, kind=kind)
 
-    def move_file(self, application_id: str, slot: str, stage_callback: StageCallback | None = None) -> dict:
+    def move_file(self, application_id: str, slot: str, stage_callback: StageCallback | None = None,
+                  kind: str = "draft") -> dict:
         """Move the file in `slot` to the other slot; a file already there moves back (swap)."""
         if slot not in SLOTS:
             raise DraftInvalid("Unknown document slot.")
-        draft = self.draft(application_id)
+        _app, draft, _guard = self._load(application_id, kind)
         source = draft["files"].get(slot)
         if not source:
             raise DraftInvalid("There is no file to move.")
@@ -422,11 +539,12 @@ class DraftService:
         emit = _emitter(stage_callback)
         for entry, target in moves:
             pdf = self.repo._download_verified(self._own_document(application_id, entry["document_id"]))
-            moved, added = self._process(application_id, target, pdf, read_pdf(pdf), cache, emit)
+            moved, added = self._process(application_id, target, pdf, read_pdf(pdf), cache, emit,
+                                         int(draft.get("doc_base") or 0))
             placements.append((target, moved))
             new_cache.update(added)
         clear = (slot, source["document_id"]) if len(moves) == 1 else None
-        return self._place(application_id, placements, new_cache, clear)
+        return self._place(application_id, placements, new_cache, clear, kind=kind)
 
     def remove_file(self, application_id: str, slot: str) -> dict:
         if slot not in SLOTS:
@@ -447,7 +565,7 @@ class DraftService:
 
     # --- values
     def save_values(self, application_id: str, *, changes: dict | None = None, reset: list | None = None,
-                    contact: dict | None = None, declaration: bool | None = None) -> dict:
+                    contact: dict | None = None, declaration: bool | None = None, kind: str = "draft") -> dict:
         changes = {k: str(v or "").strip()[:200] for k, v in (changes or {}).items()}
         unknown = set(changes) - set(FIELDS) or set(reset or []) - set(FIELDS)
         if unknown:
@@ -471,7 +589,7 @@ class DraftService:
             if declaration is not None:
                 draft["declaration"] = bool(declaration)
                 draft["declared_at"] = _now() if declaration else ""
-        return self._mutate(application_id, change)
+        return self._mutate(application_id, change, kind)
 
     def submission(self, draft: dict) -> V2Submission:
         values = current_values(draft)
@@ -499,6 +617,23 @@ class DraftService:
         vendor = self.submission(draft)
         if not vendor.legal_name.strip() or not vendor.contact_email.strip():
             raise DraftInvalid("Add your legal business name and contact email before submitting.")
+        return self._evaluate(application_id, draft, vendor, "submission", int(app.get("revision") or 0),
+                              stage_callback)
+
+    def submit_fix(self, application_id: str, stage_callback: StageCallback | None = None) -> tuple[WorkflowResult, int]:
+        """Re-check after the vendor fixed the requested items. Reuses every reading
+        already made (the latest run's and the fix uploads'). Returns (result, provider calls)."""
+        app, fix, _guard = self._load(application_id, "fix")
+        _app, run, review = self._fix_context(application_id)
+        blockers = fix_view(application_id, fix, v2.fix_items(run, review))["blockers"]
+        if blockers:
+            raise DraftInvalid(blockers[0])
+        vendor = self.submission(fix)
+        return self._evaluate(application_id, fix, vendor, "resubmission", int(app.get("revision") or 0),
+                              stage_callback, count=True)
+
+    def _evaluate(self, application_id: str, draft: dict, vendor: V2Submission, trigger: str,
+                  expected_revision: int, stage_callback: StageCallback | None, count: bool = False):
         uploads: dict[str, PDFInput | None] = {"GST": None, "BANK": None}
         manifest, cache = [], {}
         for slot in SLOTS:
@@ -517,15 +652,15 @@ class DraftService:
         extractor = CachedExtractor(self.extractor_factory(), cache)
         engine = ProcessingPipeline(extractor, approved_lookup=self.repo.approved_lookup, **self.pipeline_options)
         result = engine.evaluate(vendor, uploads["GST"], uploads["BANK"], application_id=application_id,
-                                 stage_callback=stage_callback, persistence_planned=True)
+                                 trigger=trigger, stage_callback=stage_callback, persistence_planned=True)
         try:
-            return self.repo.commit_run(result, vendor, expected_revision=int(app.get("revision") or 0),
-                                        document_manifest=manifest, stage_callback=stage_callback)
+            saved = self.repo.commit_run(result, vendor, expected_revision=expected_revision,
+                                         document_manifest=manifest, stage_callback=stage_callback)
         except PersistenceError:
             saved = self.repo.saved_result(application_id)
-            if saved is not None and saved.run_id == result.run_id:
-                return saved
-            raise
+            if saved is None or saved.run_id != result.run_id:
+                raise
+        return (saved, extractor.provider_calls) if count else saved
 
 
 def _emitter(callback: StageCallback | None) -> Callable[[str, str, str], None]:

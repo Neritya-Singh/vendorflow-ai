@@ -586,3 +586,117 @@ def r13_covered_by_vendor_values(run: dict | None) -> bool:
                                                    (run or {}).get("extracted_json") or {})
              if r["status"] == "vendor"}
     return bool(issues) and all(rows.get(issue) in typed for issue in issues)
+
+
+# ---------------------------------------------------------------- B7 part 1: fix items
+# A reviewer's correction request names WHAT the vendor must change, so the vendor's
+# fix page shows only those items (an upload slot or a field), never the full form.
+# The ids are stored after the message in review_actions.reason, like the bank-change
+# confirmation, so no schema change is needed:  "<message>\n\nRequested: doc:BANK, field:ifsc"
+REQUESTED_PREFIX = "Requested: "
+FIX_FIELDS = tuple(f[0] for f in PROVENANCE_FIELDS) + ("contact",)
+FIX_ITEM_IDS = ("doc:GST", "doc:BANK") + tuple(f"field:{f}" for f in FIX_FIELDS)
+FIX_ITEM_LABELS = {
+    "doc:GST": "New GST certificate", "doc:BANK": "New bank document",
+    **{f"field:{f[0]}": f[1] for f in PROVENANCE_FIELDS}, "field:contact": "Contact details",
+}
+_FIX_DOC_TEXT = {"GST": "Upload a new GST certificate.",
+                 "BANK": "Upload a new bank document: a cancelled cheque or a letter from your bank."}
+_FIELD_FIX_TEXT = {"contact": "Check your contact details."}
+_ITEM_TARGETS = {
+    "swapped": ("doc:GST", "doc:BANK"), "documents": ("doc:GST", "doc:BANK"),
+    "R03": ("field:gstin",), "R04": ("field:gstin",), "R05": ("field:gstin",), "R17": ("field:gstin",),
+    "R06": ("field:gstin", "field:business_state"), "R07": ("field:ifsc",), "R01:email": ("field:contact",),
+}
+_FLAG_TARGETS = {"R11": ("doc:BANK",), "R12": ("doc:BANK",), "R15": ("doc:BANK",),
+                 "R08": ("field:legal_name", "field:gstin", "field:business_state"),
+                 "R09": ("field:account_number",), "R10": ("field:ifsc",)}
+
+
+def join_requested(reason: str, items: list[str] | tuple[str, ...]) -> str:
+    known = [i for i in FIX_ITEM_IDS if i in set(items or ())]
+    return f"{reason}\n\n{REQUESTED_PREFIX}{', '.join(known)}" if known else reason
+
+
+def split_requested(reason: str) -> tuple[str, list[str]]:
+    """('<message>', ['doc:BANK', ...]). Unknown ids are dropped."""
+    marker = "\n\n" + REQUESTED_PREFIX
+    if marker not in (reason or ""):
+        return reason or "", []
+    head, tail = reason.split(marker, 1)
+    tail = tail.split("\n\n", 1)[0]
+    asked = {part.strip() for part in tail.split(",")}
+    return head, [i for i in FIX_ITEM_IDS if i in asked]
+
+
+def split_review(reason: str) -> tuple[str, str | None, list[str]]:
+    """(message, bank-change confirmation or None, requested fix-item ids)."""
+    head, confirmation = split_confirmation(reason or "")
+    message, items = split_requested(head)
+    return message, confirmation, items
+
+
+def _r01_targets(run: dict) -> list[str]:
+    payload = run.get("payload_json") or {}
+    out = [f"field:{f}" for f in FIX_FIELDS[:-1] if not str(payload.get(f) or "").strip()]
+    if not str(payload.get("contact_name") or "").strip() or not str(payload.get("contact_email") or "").strip():
+        out.append("field:contact")
+    return out
+
+
+def _vendor_item_targets(run: dict, item: dict) -> list[str]:
+    key = str(item.get("key") or "")
+    if key.startswith(("missing:", "unclear:")):
+        return ["doc:GST" if "GST" in key else "doc:BANK"]
+    if key == "R13":
+        text = str(item.get("text") or "")
+        out = (["doc:GST"] if "GST" in text else []) + (["doc:BANK"] if "bank" in text else [])
+        return out or ["doc:GST", "doc:BANK"]
+    if key == "R01":
+        return _r01_targets(run)
+    return list(_ITEM_TARGETS.get(key, ()))
+
+
+def suggested_fix_items(run: dict | None) -> list[str]:
+    """Pre-selected items for a reviewer's correction request, from the flags."""
+    if not run:
+        return []
+    wanted: list[str] = []
+    for item in vendor_items(run):
+        wanted.extend(_vendor_item_targets(run, item))
+    for flag in team_flags(run):
+        if flag["rule_id"] == "R16":
+            rows = field_provenance(run.get("payload_json") or {}, run.get("extracted_json") or {})
+            wanted.extend(f"field:{r['field']}" for r in rows if r["status"] in ("edited", "vendor"))
+        wanted.extend(_FLAG_TARGETS.get(flag["rule_id"], ()))
+    return [i for i in FIX_ITEM_IDS if i in set(wanted)]
+
+
+def fix_items(run: dict | None, review: dict | None) -> list[dict]:
+    """What the vendor must change on the fix page: the automated vendor items plus
+    the items an ACTIVE reviewer correction request names. Each is either a document
+    (an upload slot) or a field. A request saved without items (older API clients)
+    falls back to the items suggested by the flags."""
+    if not run:
+        return []
+    texts: dict[str, str] = {}
+    for item in vendor_items(run):
+        for target in _vendor_item_targets(run, item):
+            texts.setdefault(target, item["text"])
+    if active_review_request(review, run):
+        _message, _confirmation, asked = split_review(str(review.get("reason") or ""))
+        for target in asked or suggested_fix_items(run) or ["doc:GST", "doc:BANK"]:
+            texts.setdefault(target, "")
+    out = []
+    for target in FIX_ITEM_IDS:
+        if target not in texts:
+            continue
+        kind, name = target.split(":", 1)
+        if kind == "doc":
+            out.append({"id": target, "kind": "document", "slot": name,
+                        "text": texts[target] or _FIX_DOC_TEXT[name]})
+        else:
+            label = FIX_ITEM_LABELS[target]
+            out.append({"id": target, "kind": "field", "field": name,
+                        "text": texts[target] or _FIELD_FIX_TEXT.get(name, f"Check your {label if name in ('gstin', 'ifsc') else label.lower()}.")})
+    return out

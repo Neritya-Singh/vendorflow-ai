@@ -32,7 +32,7 @@ from vendorflow.persistence import (
 from vendorflow.pipeline import MinimumIntakeError
 from vendorflow.rules import GST_STATE_CODES, normalize_submission
 from vendorflow.ux_support import committed_pdf_types
-from vendorflow.v2_intake import DraftInvalid, DraftLimit, DraftSubmitted, V2Submission, draft_view
+from vendorflow.v2_intake import DraftInvalid, DraftLimit, DraftSubmitted, V2Submission, draft_view, fix_view
 
 from . import presenters
 from .config import Settings, load_settings
@@ -79,6 +79,8 @@ class Review(BaseModel):
     action: Literal["APPROVE", "REJECT", "REQUEST_CORRECTION"]
     reason: str = Field(min_length=3, max_length=1000)
     confirmation: str | None = Field(default=None, max_length=200)
+    # REQUEST_CORRECTION only: what the vendor must change (v2.FIX_ITEM_IDS).
+    items: list[str] = Field(default_factory=list, max_length=len(v2.FIX_ITEM_IDS))
     expected_revision: int
     expected_latest_run_id: str
 
@@ -469,6 +471,85 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
 
         return stream(work)
 
+    # ------------------------------------------------------------ vendor fixes (B7 part 1)
+    # After a submit, a case "waiting on you" is fixed item by item: an upload slot for a
+    # requested document, the field for a requested value. Same reading, same cache.
+
+    def fix_auth(request: Request, application_id: str, tracking_code: str) -> str:
+        application_id = (application_id or "").strip().upper()
+        check_credentials(application_id, tracking_code)
+        vendor_auth(request, application_id, tracking_code)
+        try:  # only a pending case waiting on the vendor can be fixed (checked again on write)
+            provider.drafts()._fix_context(application_id)
+        except Exception as exc:
+            raise fail(exc) from None
+        return application_id
+
+    def fixes_view(application_id: str, fix: dict) -> dict:
+        items = provider.drafts().fix_items(application_id)
+        return fix_view(application_id, fix, items, buyer=settings.workspace_name)
+
+    @app.post("/api/vendor/fix")
+    def open_fix(request: Request, body: Credentials):
+        application_id = fix_auth(request, body.application_id, body.tracking_code.strip())
+        try:
+            fix, items = provider.drafts().fix(application_id)
+            return fix_view(application_id, fix, items, buyer=settings.workspace_name)
+        except Exception as exc:
+            raise fail(exc) from None
+
+    @app.post("/api/vendor/fix/files")
+    async def upload_fix_file(
+        request: Request, application_id: str = Form(...), tracking_code: str = Form(...),
+        slot: Literal["GST", "BANK"] = Form(...), file: UploadFile = File(...),
+    ):
+        pdf = await read_upload(file, "GST certificate" if slot == "GST" else "Bank document")
+        if pdf is None:
+            raise HTTPException(400, "Choose a file to upload.")
+        application_id = fix_auth(request, application_id, tracking_code)
+        reading_budget(request)
+        service = provider.drafts()
+        return stream(lambda callback: fixes_view(
+            application_id, service.add_file(application_id, slot, pdf, callback, kind="fix")))
+
+    @app.post("/api/vendor/fix/move")
+    def move_fix_file(request: Request, body: DraftSlot):
+        application_id = fix_auth(request, body.application_id, body.tracking_code.strip())
+        reading_budget(request)
+        service = provider.drafts()
+        return stream(lambda callback: fixes_view(
+            application_id, service.move_file(application_id, body.slot, callback, kind="fix")))
+
+    @app.put("/api/vendor/fix/values")
+    def save_fix_values(request: Request, body: DraftValues):
+        application_id = fix_auth(request, body.application_id, body.tracking_code.strip())
+        try:
+            fix = provider.drafts().save_values(application_id, changes=body.changes, reset=body.reset,
+                                                contact=body.contact, kind="fix")
+            return fixes_view(application_id, fix)
+        except Exception as exc:
+            raise fail(exc) from None
+
+    @app.post("/api/vendor/fix/submit")
+    def submit_fix(request: Request, body: Credentials):
+        application_id = fix_auth(request, body.application_id, body.tracking_code.strip())
+        service = provider.drafts()
+        try:
+            fix, items = service.fix(application_id)  # refuses final / with-our-team cases up front
+            blockers = fix_view(application_id, fix, items)["blockers"]
+            if blockers:
+                raise DraftInvalid(blockers[0])
+        except Exception as exc:
+            raise fail(exc) from None
+
+        def work(callback):
+            service.submit_fix(application_id, callback)
+            repo = service.repo
+            return presenters.vendor_view(repo._application(application_id), repo.runs_for_application(application_id),
+                                          repo.review_history(application_id), buyer=settings.workspace_name)
+
+        return stream(work)
+
     # ------------------------------------------------------------ admin auth
     @app.post("/api/admin/session")
     def admin_login(request: Request, body: Login):
@@ -644,8 +725,12 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         reason = body.reason.strip()
         if len(reason) < 3:
             raise HTTPException(400, "A specific written rationale is required.")
-        if v2.CONFIRMATION_PREFIX.strip() in reason:
+        if v2.CONFIRMATION_PREFIX.strip() in reason or v2.REQUESTED_PREFIX.strip() in reason:
             raise HTTPException(400, "Use the confirmation option instead of typing it into the reason.")
+        if body.items and (body.action != "REQUEST_CORRECTION" or set(body.items) - set(v2.FIX_ITEM_IDS)):
+            raise HTTPException(400, "Choose what the vendor should change from the listed items.")
+        if body.action == "REQUEST_CORRECTION":
+            reason = v2.join_requested(reason, body.items)
         try:
             repo, app_row, runs, reviews = load_case(application_id)
             if body.action == "APPROVE" and v2.requires_confirmation(runs[0] if runs else None):

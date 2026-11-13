@@ -100,7 +100,7 @@ DELIVERY_NOTE = "Message added to the vendor's application page (no email sent)"
 
 
 def _vendor_reason(review: dict) -> str:
-    reason, _confirmation = v2.split_confirmation(str(review.get("reason") or ""))
+    reason, _confirmation, _items = v2.split_review(str(review.get("reason") or ""))
     return vendor_safe_review_reason(reason.strip())
 
 
@@ -240,7 +240,7 @@ def vendor_view(record: dict, runs: list[dict], reviews: list[dict], *, buyer: s
         "needs_resume": status == "PENDING" and owner == v2.DRAFT,
         "revision": int(record.get("revision") or 0),
         "latest_run_id": record.get("latest_run_id"),
-        "submitted": {k: v for k, v in (record.get("payload_json") or {}).items() if k != "draft"},
+        "submitted": {k: v for k, v in (record.get("payload_json") or {}).items() if k not in ("draft", "fix")},
         "created_at": _iso(record.get("created_at")),
     }
 
@@ -259,9 +259,10 @@ def receipt_view(application_id: str, result: WorkflowResult, vendor: dict, mani
 # ---------------------------------------------------------------- admin views
 
 def _review_dict(row: dict) -> dict:
-    reason, confirmation = v2.split_confirmation(str(row.get("reason") or ""))
+    reason, confirmation, items = v2.split_review(str(row.get("reason") or ""))
     return {"action": row.get("action"), "label": REVIEW_ACTION_LABELS.get(str(row.get("action")), row.get("action")),
-            "reason": reason, "confirmation": confirmation, "actor": row.get("actor"),
+            "reason": reason, "confirmation": confirmation,
+            "requested": [v2.FIX_ITEM_LABELS[i] for i in items], "actor": row.get("actor"),
             "reviewed_run_id": row.get("reviewed_run_id"), "created_at": _iso(row.get("created_at"))}
 
 
@@ -465,6 +466,8 @@ def admin_case(app: dict, runs: list[dict], reviews: list[dict], linked: list[di
         "linked_records": linked_records(app, latest_run, linked or []),
         "messages": message_log(runs, reviews, buyer=buyer),
         "correction_draft": v2.correction_draft(latest_run, str(payload.get("legal_name") or "")),
+        "correction_items": [{"id": i, "label": v2.FIX_ITEM_LABELS[i]} for i in v2.FIX_ITEM_IDS],
+        "suggested_items": v2.suggested_fix_items(latest_run),
         "requires_confirmation": app.get("current_status") == "PENDING" and v2.requires_confirmation(latest_run),
         "confirmation_text": v2.BANK_CHANGE_CONFIRMATION,
         "can_review": app.get("current_status") == "PENDING" and bool(latest_run),

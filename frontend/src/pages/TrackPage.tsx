@@ -1,15 +1,13 @@
-import { Eye, EyeOff, FileText, LogOut, RefreshCw, RotateCcw, Search, Send } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Eye, EyeOff, FileText, LogOut, RefreshCw, RotateCcw, Search } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { PageHeader, VendorFrame } from "../components/AppShell";
-import { FilePicker } from "../components/FilePicker";
 import { DecisionCard, SavedStages, ScopeNote, VendorTimeline } from "../components/Outcome";
 import { MessageLog } from "../components/MessageLog";
 import { ProcessingPanel } from "../components/ProcessingPanel";
-import { BankSection, BusinessSection, type FieldErrors } from "../components/VendorFormSections";
+import { FixPanel } from "../components/vendor/FixPanel";
 import { Alert, Button, Card, CardHeader, Field, Input, Spinner } from "../components/ui";
 import { ApiError, api } from "../lib/api";
-import { EMAIL_PATTERN } from "../lib/format";
 import { EMPTY_FIELDS, type Credentials, type VendorFields, type VendorView } from "../lib/types";
 import { useWorkflowRun } from "../lib/useWorkflowRun";
 import { useAppState } from "../state";
@@ -80,44 +78,26 @@ function SignIn({ onFound, initial }: { onFound: (c: Credentials, v: VendorView)
   );
 }
 
-function CorrectionForm({ view, creds, onSaved, retryOnly }: {
-  view: VendorView;
-  creds: Credentials;
-  onSaved: (v: VendorView) => void;
-  retryOnly: boolean;
-}) {
-  const { meta } = useAppState();
+/** After a reading outage the same details and documents can be checked again. */
+function RetryCard({ view, creds, onSaved }: { view: VendorView; creds: Credentials; onSaved: (v: VendorView) => void }) {
   const { state: run, start, reset } = useWorkflowRun();
-  const [fields, setFields] = useState<VendorFields>(() => toFields(view.submitted));
-  const [gst, setGst] = useState<File | null>(null);
-  const [bank, setBank] = useState<File | null>(null);
-  const [errors, setErrors] = useState<FieldErrors>({});
-  const panel = useRef<HTMLDivElement>(null);
-  const current = (type: string) => view.documents.find((d) => d.doc_type === type);
-
-  const submit = async (useFields: VendorFields, files: { gst: File | null; bank: File | null }) => {
-    const found: FieldErrors = {};
-    if (!useFields.legal_name.trim()) found.legal_name = "Enter the legal business name.";
-    if (!EMAIL_PATTERN.test(useFields.contact_email.trim())) found.contact_email = "Enter a valid contact email.";
-    setErrors(found);
-    if (Object.keys(found).length) return;
-    panel.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const retry = async () => {
     const result = await start({
       creds,
-      fields: useFields,
-      ...files,
-      ...(view.needs_resume ? {} : { expected: { revision: view.revision ?? 0, latest_run_id: view.latest_run_id ?? "" } }),
+      fields: toFields(view.submitted),
+      gst: null,
+      bank: null,
+      expected: { revision: view.revision ?? 0, latest_run_id: view.latest_run_id ?? "" },
     });
     if (result) onSaved(result);
   };
-
   if (run.phase !== "idle") {
     return (
-      <div ref={panel} className="grid gap-3">
-        <ProcessingPanel run={run} title={retryOnly ? "Retrying the document check" : "Re-checking your application"} />
+      <div className="grid gap-3">
+        <ProcessingPanel run={run} title="Retrying the document check" />
         {run.phase === "failed" || run.phase === "interrupted" ? (
           <div className="flex gap-2">
-            <Button variant="secondary" icon={RotateCcw} onClick={reset}>Back to form</Button>
+            <Button variant="secondary" icon={RotateCcw} onClick={reset}>Back</Button>
             {run.error?.status === 409 ? (
               <Button variant="secondary" icon={RefreshCw} onClick={() => window.location.reload()}>Reload page</Button>
             ) : null}
@@ -126,69 +106,15 @@ function CorrectionForm({ view, creds, onSaved, retryOnly }: {
       </div>
     );
   }
-
-  if (retryOnly) {
-    return (
-      <Card ref={panel} className="border-amber-200">
-        <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
-          <div>
-            <h2 className="text-[15px] font-semibold text-slate-900">Try the check again</h2>
-            <p className="mt-0.5 text-[13px] text-slate-600">Runs the same details and documents again. Nothing needs to change.</p>
-          </div>
-          <Button icon={RotateCcw} onClick={() => void submit(toFields(view.submitted), { gst: null, bank: null })}>
-            Retry check now
-          </Button>
-        </div>
-      </Card>
-    );
-  }
-
   return (
-    <Card>
-      <CardHeader
-        title={view.needs_resume ? "Continue your application" : "Fix the items above"}
-        description={
-          view.needs_resume
-            ? "Your application was started but not checked yet. Upload your documents again to finish it."
-            : "Change only what's listed above. Your current documents are kept unless you upload a replacement; your application ID stays the same."
-        }
-      />
-      <form
-        noValidate
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit(fields, { gst, bank });
-        }}
-      >
-        <div className="grid gap-7 px-5 py-5">
-          <section>
-            <h3 className="mb-3 text-[13px] font-semibold uppercase tracking-wide text-slate-500">Business</h3>
-            <BusinessSection values={fields} onChange={(p) => setFields((f) => ({ ...f, ...p }))} errors={errors} states={meta?.states ?? []} />
-          </section>
-          <section className="border-t border-line pt-6">
-            <h3 className="mb-3 text-[13px] font-semibold uppercase tracking-wide text-slate-500">Banking</h3>
-            <BankSection values={fields} onChange={(p) => setFields((f) => ({ ...f, ...p }))} />
-          </section>
-          <section className="grid gap-5 border-t border-line pt-6">
-            <h3 className="text-[13px] font-semibold uppercase tracking-wide text-slate-500">Replacement documents</h3>
-            <FilePicker
-              label="GST registration certificate"
-              description={current("GST") ? `On file: version ${current("GST")!.version}. Leave empty to keep it.` : "No GST certificate on file."}
-              file={gst}
-              onChange={setGst}
-            />
-            <FilePicker
-              label="Bank letter or cancelled cheque"
-              description={current("BANK") ? `On file: version ${current("BANK")!.version}. Leave empty to keep it.` : "No bank proof on file."}
-              file={bank}
-              onChange={setBank}
-            />
-          </section>
+    <Card className="border-amber-200">
+      <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4">
+        <div>
+          <h2 className="text-[15px] font-semibold text-slate-900">Try the check again</h2>
+          <p className="mt-0.5 text-[13px] text-slate-600">Runs the same details and documents again. Nothing needs to change.</p>
         </div>
-        <div className="flex justify-end border-t border-line bg-slate-50/60 px-5 py-4">
-          <Button type="submit" size="lg" icon={Send}>{view.needs_resume ? "Submit for checking" : "Re-check"}</Button>
-        </div>
-      </form>
+        <Button icon={RotateCcw} onClick={() => void retry()}>Retry check now</Button>
+      </div>
     </Card>
   );
 }
@@ -276,8 +202,10 @@ export function TrackPage() {
           <div className="flex min-h-0 flex-col gap-4 fit:overflow-y-auto [&>*]:shrink-0">
             {notice ? <Alert tone="success">{notice}</Alert> : null}
             <DecisionCard view={view} />
-            {view.editable || view.needs_resume || view.retry_available ? (
-              <CorrectionForm key={formKey} view={view} creds={creds} onSaved={onSaved} retryOnly={view.retry_available && !view.editable} />
+            {view.editable ? (
+              <FixPanel key={formKey} creds={creds} onSaved={onSaved} />
+            ) : view.retry_available ? (
+              <RetryCard key={formKey} view={view} creds={creds} onSaved={onSaved} />
             ) : null}
             {view.stages.some((s) => s.state !== "NOT_RUN") ? <SavedStages view={view} /> : null}
           </div>

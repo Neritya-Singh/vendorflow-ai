@@ -17,7 +17,7 @@ const inputClass = (warn: boolean, invalid: boolean) =>
     invalid ? "border-[#F04438]" : warn ? "border-[1.5px] border-[#F79009] bg-[#FFFCF5]" : "border-[#D0D5DD]",
   );
 
-function Card({ id, title, source, action, children }: {
+export function Card({ id, title, source, action, children }: {
   id: string;
   title: string;
   source?: string;
@@ -38,7 +38,7 @@ function Card({ id, title, source, action, children }: {
   );
 }
 
-function FieldRow({ field, editing, states, onSave, onReset }: {
+export function FieldRow({ field, editing, states, onSave, onReset }: {
   field: DraftField;
   editing: boolean;
   states: string[];
@@ -182,7 +182,7 @@ function DocCard({ slot, title, view, states, onSave, onReset, extra }: {
   );
 }
 
-function ContactInput({ label, type, value, error, autoComplete, onCommit }: {
+export function ContactInput({ label, type, value, error, autoComplete, onCommit }: {
   label: string;
   type: string;
   value: string;

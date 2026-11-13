@@ -56,7 +56,7 @@ class _Query:
     def is_(self, col, value):
         if value != "null":
             raise NotImplementedError("offline double supports is_(col, 'null') only")
-        self.predicates.append(lambda r: r.get(col) is None)
+        self.predicates.append(lambda r: _path(r, col) is None)
         return self
 
     def update(self, values):

@@ -21,7 +21,7 @@ export interface SlotActivity {
  * vendor can pick the next file while this one is read. Every status shown here
  * comes from the server's reading stages and saved draft, never from a timer.
  */
-export function DocumentSlot({ slot, file, activity, error, maxBytes, onFile, onMove, onRetry }: {
+export function DocumentSlot({ slot, file, activity, error, maxBytes, onFile, onMove, onRetry, note }: {
   slot: Slot;
   file: DraftFile | null;
   activity: SlotActivity | null;
@@ -30,6 +30,8 @@ export function DocumentSlot({ slot, file, activity, error, maxBytes, onFile, on
   onFile: (file: File) => void;
   onMove: () => void;
   onRetry: (() => void) | null;
+  /** Extra line under an empty slot, e.g. which file is on file now. */
+  note?: string;
 }) {
   const inputId = useId();
   const input = useRef<HTMLInputElement>(null);
@@ -124,6 +126,7 @@ export function DocumentSlot({ slot, file, activity, error, maxBytes, onFile, on
           </span>
           {picker}
         </label>
+        {note ? <p className="text-[13px] text-muted">{note}</p> : null}
         {errorLine}
         {error?.includes("5 MB") ? <span className="sr-only">{tooBig}</span> : null}
       </div>

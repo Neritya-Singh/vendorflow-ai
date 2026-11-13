@@ -5,16 +5,15 @@ import { VendorFrame } from "../components/AppShell";
 import { CredentialsCard, DecisionCard, SavedStages, ScopeNote } from "../components/Outcome";
 import { ProcessingPanel } from "../components/ProcessingPanel";
 import { DetailsCards } from "../components/vendor/DetailsCards";
-import { DocumentSlot, SLOT_SHORT, type SlotActivity } from "../components/vendor/DocumentSlot";
+import { DocumentSlot, SLOT_SHORT } from "../components/vendor/DocumentSlot";
 import { Alert, Button, CopyValue, Spinner, cx } from "../components/ui";
-import { ApiError, api, moveDraftFile, submitDraft, uploadDraftFile } from "../lib/api";
-import type { Contact, DraftFieldKey, DraftStreamMessage, DraftView, Slot } from "../lib/types";
+import { api, submitDraft } from "../lib/api";
+import type { Contact, DraftFieldKey, DraftView, Slot } from "../lib/types";
+import { useSlotReading } from "../lib/useSlotReading";
 import { useWorkflowRun } from "../lib/useWorkflowRun";
 import { useAppState } from "../state";
 
 const SLOTS: Slot[] = ["GST", "BANK"];
-const READING_ORDER = ["U1", "U2", "U3"];
-const READING_LABEL: Record<string, string> = { U1: "Uploading", U2: "Identifying the document", U3: "Reading the details" };
 
 /** A rounded content card used for every vendor step (V2_03 §6). */
 function Panel({ children, className, labelledBy }: { children: ReactNode; className?: string; labelledBy?: string }) {
@@ -61,13 +60,10 @@ export function ApplyPage() {
   const navigate = useNavigate();
   const { state: run, start, reset } = useWorkflowRun();
   const [view, setView] = useState<DraftView | null>(null);
-  const [activity, setActivity] = useState<Partial<Record<Slot, SlotActivity>>>({});
-  const [slotErrors, setSlotErrors] = useState<Partial<Record<Slot, string>>>({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [ack, setAck] = useState(false);
   const [showBlockers, setShowBlockers] = useState(false);
-  const lastFiles = useRef<Partial<Record<Slot, File>>>({});
   const saving = useRef<Promise<unknown>>(Promise.resolve());
   const contactRef = useRef<Contact | null>(null);
   const { creds } = apply;
@@ -108,70 +104,7 @@ export function ApplyPage() {
     setView((current) => (current && current.rev > v.rev ? current : v));
     if (!contactRef.current) contactRef.current = v.contact;
   }, []);
-
-  const readingHandler = (slots: Slot[], filename: (s: Slot) => string) => (m: DraftStreamMessage) => {
-    if (m.type === "stage") {
-      const at = READING_ORDER.indexOf(m.stage_id);
-      const done = m.event !== "STARTED";
-      setActivity((a) => {
-        const next = { ...a };
-        for (const s of slots) {
-          next[s] = { filename: filename(s), stage: READING_LABEL[m.stage_id] ?? "Working", progress: Math.round(((at + (done ? 1 : 0.5)) / 3) * 100) };
-        }
-        return next;
-      });
-    } else if (m.type === "result") {
-      adopt(m.data);
-    } else if (m.type === "error") {
-      setSlotErrors((e) => ({ ...e, ...Object.fromEntries(slots.map((s) => [s, m.message])) }));
-    }
-  };
-
-  const finish = (slots: Slot[]) =>
-    setActivity((a) => {
-      const next = { ...a };
-      for (const s of slots) delete next[s];
-      return next;
-    });
-
-  const upload = async (slot: Slot, file: File) => {
-    if (!creds) return;
-    setSlotErrors((e) => ({ ...e, [slot]: undefined }));
-    if (!/\.pdf$/i.test(file.name)) {
-      setSlotErrors((e) => ({ ...e, [slot]: "Upload a PDF. Photos and scans are supported soon." }));
-      return;
-    }
-    if (file.size > maxBytes) {
-      setSlotErrors((e) => ({ ...e, [slot]: "This file is larger than 5 MB. Upload a smaller PDF." }));
-      return;
-    }
-    lastFiles.current[slot] = file;
-    setActivity((a) => ({ ...a, [slot]: { filename: file.name, stage: "Uploading", progress: 8 } }));
-    try {
-      await uploadDraftFile(creds, slot, file, readingHandler([slot], () => file.name));
-    } catch (e) {
-      setSlotErrors((x) => ({ ...x, [slot]: e instanceof ApiError && e.status ? e.message : "The upload didn't finish. Check your connection and try again." }));
-    } finally {
-      finish([slot]);
-    }
-  };
-
-  const move = async (slot: Slot) => {
-    if (!creds || !view) return;
-    const other: Slot = slot === "GST" ? "BANK" : "GST";
-    // The file in `slot` goes to `other`; a file already in `other` comes back to `slot`.
-    const landing: Partial<Record<Slot, string>> = { [other]: view.files[slot]?.filename ?? "" };
-    if (view.files[other]) landing[slot] = view.files[other]!.filename;
-    const slots = Object.keys(landing) as Slot[];
-    setSlotErrors({});
-    try {
-      await moveDraftFile(creds, slot, readingHandler(slots, (s) => landing[s] ?? ""));
-    } catch (e) {
-      setSlotErrors({ [slot]: e instanceof Error ? e.message : "Couldn't move the file." });
-    } finally {
-      finish(SLOTS);
-    }
-  };
+  const { activity, slotErrors, upload, move, retry } = useSlotReading<DraftView>({ creds, base: "/api/vendor/draft", maxBytes, adopt });
 
   const save = (body: Parameters<typeof api.saveDraft>[1]) => {
     if (!creds) return Promise.resolve();
@@ -285,8 +218,8 @@ export function ApplyPage() {
                   error={slotErrors[slot] ?? null}
                   maxBytes={maxBytes}
                   onFile={(f) => void upload(slot, f)}
-                  onMove={() => void move(slot)}
-                  onRetry={lastFiles.current[slot] ? () => void upload(slot, lastFiles.current[slot]!) : null}
+                  onMove={() => view && void move(slot, view)}
+                  onRetry={retry(slot)}
                 />
               ))}
               {error ? <Alert tone="error">{error}</Alert> : null}

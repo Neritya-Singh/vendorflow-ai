@@ -171,6 +171,8 @@ try {
   check("B 'C' opens a pre-drafted correction request", draft.includes("as the account holder"), draft);
   await dialog.getByLabel("Message to the vendor").fill("Upload a bank letter showing the company's legal name as account holder.");
   check("B dialog previews the exact vendor message", (await dialog.textContent()).includes("Our team needs one change: Upload a bank letter"));
+  check("B dialog pre-selects the flagged item 'New bank document'",
+    (await dialog.getByRole("button", { name: "New bank document" }).getAttribute("aria-pressed")) === "true");
   await shot(ap, "09-admin-correction-dialog", false);
   await dialog.getByRole("button", { name: "Send request" }).click();
   await ap.getByText("Decision saved · Message added for vendor").waitFor();
@@ -190,13 +192,27 @@ try {
   check("B vendor message log lists the correction and the earlier outcome", log.includes("Our team needs one change")
     && log.includes("with our team for a final check") && !/email sent/i.test(log));
   await shot(page, "10-track-correction-requested");
-  await page.getByLabel("Account holder name").fill(ec2.legal_name);
-  await page.locator('input[type="file"]').nth(1).setInputFiles(pdf("happy", "bank"));
+  // Upload-first fix: only the requested bank slot, same reading + wrong-slot warning, no typed form.
+  const fixPanel = page.locator("[data-fix-panel]");
+  await fixPanel.waitFor();
+  check("B fix page shows only the requested bank slot and no typed form",
+    (await fixPanel.locator("[data-slot-state]").count()) === 1
+      && (await fixPanel.getByText("Cancelled cheque or bank letter").count()) === 1
+      && (await page.getByLabel("Legal name").count()) === 0 && (await page.getByLabel("Account holder").count()) === 0);
+  check("B re-check disabled until a new bank document is read", await page.getByRole("button", { name: "Re-check" }).isDisabled());
+  await fixPanel.locator('input[type="file"]').setInputFiles(pdf("happy", "gst"));
+  await fixPanel.locator('[data-slot-state="wrong_slot"]').waitFor();
+  check("B a GST certificate in the bank slot gets the wrong-slot warning", (await fixPanel.getByRole("button", { name: "Move it" }).count()) === 1);
+  await shot(page, "10b-fix-wrong-slot");
+  await fixPanel.locator('input[type="file"]').setInputFiles(pdf("happy", "bank"));
+  await fixPanel.locator('[data-slot-state="read"]').waitFor();
+  check("B item ticked once the new bank document is read", (await fixPanel.locator('[data-item="doc:BANK"]').getAttribute("data-done")) === "true");
+  await shot(page, "10c-fix-read");
   await page.getByRole("button", { name: "Re-check" }).click();
   await page.getByText("Your update was checked and saved").waitFor({ timeout: 90_000 });
   const afterB = await page.locator("main").textContent();
   check("B corrected application re-run → Approved", (await outcome(page)) === "APPROVED/COMPLETE");
-  check("B history shows BANK v2 with original GST v1 kept", afterB.includes("Bank proof v2") && afterB.includes("GST certificate v1"));
+  check("B history shows the new BANK v3 with original GST v1 kept", afterB.includes("Bank proof v3") && afterB.includes("GST certificate v1"));
   await shot(page, "11-track-after-correction");
 
   // ------------------------------------------------------------ terminal immutability
