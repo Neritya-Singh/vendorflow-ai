@@ -71,7 +71,9 @@ def test_reviewer_asks_for_new_bank_document_vendor_uploads_and_is_approved(coun
     calls = len(provider.calls)
     wrong = fix_upload(client, c, "BANK", gst, "gst.pdf")  # same reading + wrong-slot warning
     assert wrong["files"]["BANK"]["status"] == "wrong_slot" and wrong["files"]["BANK"]["suggested_slot"] == "GST"
-    assert not wrong["ready"] and len(provider.calls) == calls  # no provider call for a wrong-slot file
+    # Read once as the GST certificate it is (so "Move it" would need no new call).
+    assert not wrong["ready"] and len(provider.calls) == calls + 1
+    calls = len(provider.calls)
 
     _f, _g, good_bank = fixture("happy")
     view = fix_upload(client, c, "BANK", good_bank, "new_bank_letter.pdf")

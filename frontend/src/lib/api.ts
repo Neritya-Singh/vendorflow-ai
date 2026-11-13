@@ -85,6 +85,20 @@ export const api = {
     request<{ pages: number; total_pages: number }>(
       `/api/admin/applications/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/documents/${docType}/pages`,
     ),
+  /** One rendered page as an image (reviewer session cookie). */
+  documentPageBlob: async (id: string, runId: string, docType: string, page: number): Promise<Blob> => {
+    let response: Response;
+    try {
+      response = await fetch(api.documentPageUrl(id, runId, docType, page), { credentials: "same-origin" });
+    } catch {
+      throw new ApiError(0, "Can't reach the VendorFlow server. Check your connection and try again.");
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new ApiError(response.status, detailOf(body, `Request failed (${response.status}).`));
+    }
+    return response.blob();
+  },
   documentPageUrl: (id: string, runId: string, docType: string, page: number) =>
     `/api/admin/applications/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/documents/${docType}/pages/${page}`,
   documentUrl: (id: string, runId: string, docType: string) =>

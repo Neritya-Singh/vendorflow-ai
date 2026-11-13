@@ -27,7 +27,7 @@ from vendorflow.models import StageEvent, VendorSubmission
 from vendorflow.pdf_reader import MAX_PDF_BYTES, PDFInput, UploadError, read_pdf
 from vendorflow.persistence import (
     PersistenceError, PreparedIntake, StaleRevision, TerminalApplication, UnauthorizedTracking,
-    prepare_intake,
+    parallel, prepare_intake,
 )
 from vendorflow.pipeline import MinimumIntakeError
 from vendorflow.rules import GST_STATE_CODES, normalize_submission
@@ -314,8 +314,8 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         record = vendor_auth(request, application_id, body.tracking_code.strip())
         try:
             repo = provider.repo()
-            runs = repo.runs_for_application(application_id)
-            reviews = repo.review_history(application_id)
+            runs, reviews = parallel(lambda: repo.runs_for_application(application_id),
+                                     lambda: repo.review_history(application_id))
         except Exception as exc:
             raise fail(exc) from None
         return presenters.vendor_view(record, runs, reviews, buyer=settings.workspace_name)
@@ -382,23 +382,30 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
     # Upload-first intake. The ID + tracking code from /api/vendor/intake identify the
     # draft; the first upload creates it. Every call re-checks the code server-side.
 
-    def draft_auth(request: Request, application_id: str, tracking_code: str, *, create: bool = False) -> None:
+    def draft_auth(request: Request, application_id: str, tracking_code: str, *, create: bool = False) -> dict:
+        """The authenticated application row (one round trip), or a new draft row when
+        `create` and none exists yet. The callers reuse the row instead of reading it again."""
         application_id = (application_id or "").strip().upper()
         check_credentials(application_id, tracking_code)
+        key = client_key(request)
+        if vendor_limiter.blocked(key):
+            raise HTTPException(429, "Too many unsuccessful attempts. Wait 15 minutes and try again.")
         try:
-            exists = bool(provider.repo().client.table("applications").select("id")
-                          .eq("id", application_id).limit(1).execute().data)
+            record = provider.repo().find_application(application_id)
         except Exception as exc:
             raise fail(exc) from None
-        if exists:
-            vendor_auth(request, application_id, tracking_code)
-        elif create:
+        if record is None and create:
             try:
-                provider.drafts().create_draft(application_id, tracking_code)
+                return provider.drafts().create_draft(application_id, tracking_code)
             except Exception as exc:
                 raise fail(exc) from None
-        else:
-            vendor_auth(request, application_id, tracking_code)  # counts as a failed lookup
+        try:
+            if record is None:
+                raise UnauthorizedTracking("Application ID or tracking code is incorrect.")
+            return provider.repo().check_tracking(record, application_id, tracking_code)
+        except UnauthorizedTracking as exc:
+            vendor_limiter.hit(key)  # counts as a failed lookup
+            raise fail(exc) from None
 
     def reading_budget(request: Request) -> None:
         key = client_key(request)
@@ -412,9 +419,9 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
     @app.post("/api/vendor/draft")
     def open_draft(request: Request, body: Credentials):
         application_id = body.application_id.strip().upper()
-        draft_auth(request, application_id, body.tracking_code.strip())
+        app_row = draft_auth(request, application_id, body.tracking_code.strip())
         try:
-            return drafts_view(application_id, provider.drafts().draft(application_id))
+            return drafts_view(application_id, provider.drafts().draft(application_id, app_row))
         except Exception as exc:
             raise fail(exc) from None
 
@@ -427,35 +434,37 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         pdf = await read_upload(file, "GST certificate" if slot == "GST" else "Bank document", images=True)
         if pdf is None:
             raise HTTPException(400, "Choose a file to upload.")
-        draft_auth(request, application_id, tracking_code, create=True)
+        app_row = draft_auth(request, application_id, tracking_code, create=True)
         reading_budget(request)
         service = provider.drafts()
-        return stream(lambda callback: drafts_view(application_id, service.add_file(application_id, slot, pdf, callback)))
+        return stream(lambda callback: drafts_view(application_id, service.add_file(
+            application_id, slot, pdf, callback, app=app_row)))
 
     @app.post("/api/vendor/draft/move")
     def move_draft_file(request: Request, body: DraftSlot):
         application_id = body.application_id.strip().upper()
-        draft_auth(request, application_id, body.tracking_code.strip())
+        app_row = draft_auth(request, application_id, body.tracking_code.strip())
         reading_budget(request)
         service = provider.drafts()
-        return stream(lambda callback: drafts_view(application_id, service.move_file(application_id, body.slot, callback)))
+        return stream(lambda callback: drafts_view(application_id, service.move_file(
+            application_id, body.slot, callback, app=app_row)))
 
     @app.post("/api/vendor/draft/remove")
     def remove_draft_file(request: Request, body: DraftSlot):
         application_id = body.application_id.strip().upper()
-        draft_auth(request, application_id, body.tracking_code.strip())
+        app_row = draft_auth(request, application_id, body.tracking_code.strip())
         try:
-            return drafts_view(application_id, provider.drafts().remove_file(application_id, body.slot))
+            return drafts_view(application_id, provider.drafts().remove_file(application_id, body.slot, app=app_row))
         except Exception as exc:
             raise fail(exc) from None
 
     @app.put("/api/vendor/draft/values")
     def save_draft_values(request: Request, body: DraftValues):
         application_id = body.application_id.strip().upper()
-        draft_auth(request, application_id, body.tracking_code.strip())
+        app_row = draft_auth(request, application_id, body.tracking_code.strip())
         try:
             draft = provider.drafts().save_values(application_id, changes=body.changes, reset=body.reset,
-                                                  contact=body.contact, declaration=body.declaration)
+                                                  contact=body.contact, declaration=body.declaration, app=app_row)
             return drafts_view(application_id, draft)
         except Exception as exc:
             raise fail(exc) from None
@@ -464,24 +473,24 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
     def submit_draft(request: Request, body: DraftSubmit):
         application_id = body.application_id.strip().upper()
         tracking_code = body.tracking_code.strip()
-        draft_auth(request, application_id, tracking_code)
+        app_row = draft_auth(request, application_id, tracking_code)
         service = provider.drafts()
-        try:
-            if body.declaration:
-                service.save_values(application_id, declaration=True)
-            elif not service.repo._application(application_id).get("latest_run_id"):
-                raise DraftInvalid("Confirm that these details are correct and belong to your business.")
-        except DraftSubmitted:
-            pass  # already submitted: the worker returns the saved result
-        except Exception as exc:
-            raise fail(exc) from None
+        if not body.declaration and not app_row.get("latest_run_id"):
+            raise fail(DraftInvalid("Confirm that these details are correct and belong to your business."))
 
         def work(callback):
-            result = service.submit(application_id, callback)
-            saved = service.repo.runs_for_application(application_id)
-            run = next((r for r in saved if r.get("id") == result.run_id), {})
-            return presenters.receipt_view(application_id, result, run.get("payload_json") or {},
-                                           run.get("document_manifest") or [], buyer=settings.workspace_name)
+            # The declaration is recorded with the run itself (its payload), not by a
+            # separate draft write first; an already-submitted case returns its saved result.
+            evidence: dict = {}
+            result = service.submit(application_id, callback, app=app_row, declaration=body.declaration,
+                                    evidence=evidence)
+            if evidence:
+                payload, manifest = evidence["payload"], evidence["manifest"]
+            else:
+                saved = service.repo.runs_for_application(application_id)
+                run = next((r for r in saved if r.get("id") == result.run_id), {})
+                payload, manifest = run.get("payload_json") or {}, run.get("document_manifest") or []
+            return presenters.receipt_view(application_id, result, payload, manifest, buyer=settings.workspace_name)
 
         return stream(work)
 
@@ -489,25 +498,25 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
     # After a submit, a case "waiting on you" is fixed item by item: an upload slot for a
     # requested document, the field for a requested value. Same reading, same cache.
 
-    def fix_auth(request: Request, application_id: str, tracking_code: str) -> str:
+    def fix_auth(request: Request, application_id: str, tracking_code: str) -> tuple[str, tuple]:
+        """(application ID, fix context). The context (application row, latest run, latest
+        review) is loaded once here and reused; every write is still compare-and-swap guarded."""
         application_id = (application_id or "").strip().upper()
         check_credentials(application_id, tracking_code)
-        vendor_auth(request, application_id, tracking_code)
+        record = vendor_auth(request, application_id, tracking_code)
         try:  # only a pending case waiting on the vendor can be fixed (checked again on write)
-            provider.drafts()._fix_context(application_id)
+            return application_id, provider.drafts()._fix_context(application_id, app=record)
         except Exception as exc:
             raise fail(exc) from None
-        return application_id
 
-    def fixes_view(application_id: str, fix: dict) -> dict:
-        items = provider.drafts().fix_items(application_id)
-        return fix_view(application_id, fix, items, buyer=settings.workspace_name)
+    def fixes_view(application_id: str, fix: dict, ctx: tuple) -> dict:
+        return fix_view(application_id, fix, v2.fix_items(ctx[1], ctx[2]), buyer=settings.workspace_name)
 
     @app.post("/api/vendor/fix")
     def open_fix(request: Request, body: Credentials):
-        application_id = fix_auth(request, body.application_id, body.tracking_code.strip())
+        application_id, ctx = fix_auth(request, body.application_id, body.tracking_code.strip())
         try:
-            fix, items = provider.drafts().fix(application_id)
+            fix, items = provider.drafts().fix(application_id, ctx=ctx)
             return fix_view(application_id, fix, items, buyer=settings.workspace_name)
         except Exception as exc:
             raise fail(exc) from None
@@ -520,36 +529,36 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
         pdf = await read_upload(file, "GST certificate" if slot == "GST" else "Bank document", images=True)
         if pdf is None:
             raise HTTPException(400, "Choose a file to upload.")
-        application_id = fix_auth(request, application_id, tracking_code)
+        application_id, ctx = fix_auth(request, application_id, tracking_code)
         reading_budget(request)
         service = provider.drafts()
         return stream(lambda callback: fixes_view(
-            application_id, service.add_file(application_id, slot, pdf, callback, kind="fix")))
+            application_id, service.add_file(application_id, slot, pdf, callback, kind="fix", ctx=ctx), ctx))
 
     @app.post("/api/vendor/fix/move")
     def move_fix_file(request: Request, body: DraftSlot):
-        application_id = fix_auth(request, body.application_id, body.tracking_code.strip())
+        application_id, ctx = fix_auth(request, body.application_id, body.tracking_code.strip())
         reading_budget(request)
         service = provider.drafts()
         return stream(lambda callback: fixes_view(
-            application_id, service.move_file(application_id, body.slot, callback, kind="fix")))
+            application_id, service.move_file(application_id, body.slot, callback, kind="fix", ctx=ctx), ctx))
 
     @app.put("/api/vendor/fix/values")
     def save_fix_values(request: Request, body: DraftValues):
-        application_id = fix_auth(request, body.application_id, body.tracking_code.strip())
+        application_id, ctx = fix_auth(request, body.application_id, body.tracking_code.strip())
         try:
             fix = provider.drafts().save_values(application_id, changes=body.changes, reset=body.reset,
-                                                contact=body.contact, kind="fix")
-            return fixes_view(application_id, fix)
+                                                contact=body.contact, kind="fix", ctx=ctx)
+            return fixes_view(application_id, fix, ctx)
         except Exception as exc:
             raise fail(exc) from None
 
     @app.post("/api/vendor/fix/submit")
     def submit_fix(request: Request, body: Credentials):
-        application_id = fix_auth(request, body.application_id, body.tracking_code.strip())
+        application_id, ctx = fix_auth(request, body.application_id, body.tracking_code.strip())
         service = provider.drafts()
         try:
-            fix, items = service.fix(application_id)  # refuses final / with-our-team cases up front
+            fix, items = service.fix(application_id, ctx=ctx)  # refuses final / with-our-team cases up front
             blockers = fix_view(application_id, fix, items)["blockers"]
             if blockers:
                 raise DraftInvalid(blockers[0])
@@ -557,10 +566,12 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             raise fail(exc) from None
 
         def work(callback):
-            service.submit_fix(application_id, callback)
+            service.submit_fix(application_id, callback, ctx=ctx)
             repo = service.repo
-            return presenters.vendor_view(repo._application(application_id), repo.runs_for_application(application_id),
-                                          repo.review_history(application_id), buyer=settings.workspace_name)
+            fresh, runs, reviews = parallel(lambda: repo._application(application_id),
+                                            lambda: repo.runs_for_application(application_id),
+                                            lambda: repo.review_history(application_id))
+            return presenters.vendor_view(fresh, runs, reviews, buyer=settings.workspace_name)
 
         return stream(work)
 
@@ -628,12 +639,15 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
 
     def load_case(application_id: str):
         repo = provider.repo()
-        rows = repo.client.table("applications").select("*").eq("id", application_id).limit(1).execute().data
+        rows, runs, reviews = parallel(
+            lambda: repo.client.table("applications").select("*").eq("id", application_id).limit(1).execute().data,
+            lambda: repo.runs_for_application(application_id),
+            lambda: repo.review_history(application_id))
         if not rows:
             raise HTTPException(404, "Application not found.")
         app_row = rows[0]
         app_row.pop("tracking_token_hash", None)
-        return repo, app_row, repo.runs_for_application(application_id), repo.review_history(application_id)
+        return repo, app_row, runs, reviews
 
     def linked_rows(repo, runs: list[dict]) -> list[dict]:
         """Applications named by the latest run's R12/R15 evidence (staff only)."""

@@ -105,7 +105,9 @@ def test_upload_first_prefills_values_with_source_and_reuses_cache_on_submit(cou
     _fields, gst, bank = fixture("happy")
     events = upload(client, c, "GST", gst)
     stages = [e for e in events if e["type"] == "stage"]
-    assert [e["stage_id"] for e in stages if e["event"] == "COMPLETED"] == ALL_STAGES
+    # Storing (U1) runs at the same time as identifying and reading, so it may finish in any order.
+    assert [e["stage_id"] for e in stages if e["event"] == "STARTED"][0] == "U1"
+    assert sorted(e["stage_id"] for e in stages if e["event"] == "COMPLETED") == ALL_STAGES
     assert {e["label"] for e in stages} == {"Received", "Identified the document type", "Read the details"}
     assert all(e["note"] == "" for e in stages)
     view = draft_of(upload(client, c, "BANK", bank))
@@ -189,7 +191,7 @@ def test_drafts_never_reach_the_queue_or_metrics(client):
 
 # ---------------------------------------------------------------- wrong slot
 
-def test_wrong_slot_warns_without_reading_and_move_it_fixes(counted):
+def test_wrong_slot_is_read_as_what_it_is_and_move_it_reuses_that_reading(counted):
     client, provider = counted
     c = creds(client)
     _fields, _gst, bank = fixture("happy")
@@ -198,13 +200,18 @@ def test_wrong_slot_warns_without_reading_and_move_it_fixes(counted):
     assert view["files"]["GST"]["suggested_slot"] == "BANK"
     assert view["files"]["GST"]["message"] == ("This looks like a bank document. "
                                                "Did you mean to put it in the bank slot?")
-    assert provider.calls == []  # no provider call for a file in the wrong slot
+    assert provider.calls == [(False, True)]  # read once, as the bank document it is
     assert not view["documents_ready"]
+    storage = provider.repo().client.storage
+    uploads_before, downloads_before = len(storage.files), storage.downloads
     response = client.post("/api/vendor/draft/move", json={**c, "slot": "GST"})
     view = stream_events(response)[-1]["data"]
     assert view["files"]["GST"] is None and view["files"]["BANK"]["status"] == "read"
     assert field(view, "ifsc")["value"] == "DEMO0123456"
-    assert provider.calls == [(False, True)]
+    assert provider.calls == [(False, True)]  # Move it: no new provider call
+    # No re-upload and nothing downloaded (the immutable copy is made after the response).
+    assert len(storage.files) <= uploads_before + 1 and storage.copies <= 1
+    assert storage.downloads == downloads_before
 
 
 def test_swapped_files_both_warn_and_one_move_swaps_both(counted):
@@ -214,9 +221,10 @@ def test_swapped_files_both_warn_and_one_move_swaps_both(counted):
     upload(client, c, "GST", bank)
     view = draft_of(upload(client, c, "BANK", gst))
     assert [view["files"][s]["status"] for s in ("GST", "BANK")] == ["wrong_slot", "wrong_slot"]
+    assert sorted(provider.calls) == [(False, True), (True, False)]  # each read once at upload
     view = stream_events(client.post("/api/vendor/draft/move", json={**c, "slot": "BANK"}))[-1]["data"]
     assert [view["files"][s]["status"] for s in ("GST", "BANK")] == ["read", "read"]
-    assert sorted(provider.calls) == [(False, True), (True, False)]
+    assert sorted(provider.calls) == [(False, True), (True, False)]  # the swap made no new call
     client.put("/api/vendor/draft/values", json={**c, "contact": CONTACT})
     assert submit(client, c)["status"] == "APPROVED"
 

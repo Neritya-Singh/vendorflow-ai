@@ -8,6 +8,7 @@ import { DetailsCards } from "../components/vendor/DetailsCards";
 import { DocumentSlot, SLOT_SHORT } from "../components/vendor/DocumentSlot";
 import { Alert, Button, CopyValue, Spinner, cx } from "../components/ui";
 import { api, submitDraft } from "../lib/api";
+import { createSaveQueue, type SaveBody } from "../lib/saveQueue";
 import type { Contact, DraftFieldKey, DraftView, Slot } from "../lib/types";
 import { useSlotReading } from "../lib/useSlotReading";
 import { useWorkflowRun } from "../lib/useWorkflowRun";
@@ -64,7 +65,7 @@ export function ApplyPage() {
   const [loading, setLoading] = useState(false);
   const [ack, setAck] = useState(false);
   const [showBlockers, setShowBlockers] = useState(false);
-  const saving = useRef<Promise<unknown>>(Promise.resolve());
+  const [waiting, setWaiting] = useState(false);
   const contactRef = useRef<Contact | null>(null);
   const { creds } = apply;
   const maxBytes = meta?.max_pdf_bytes ?? 5 * 1024 * 1024;
@@ -106,14 +107,24 @@ export function ApplyPage() {
   }, []);
   const { activity, slotErrors, upload, move, retry } = useSlotReading<DraftView>({ creds, base: "/api/vendor/draft", maxBytes, adopt });
 
-  const save = (body: Parameters<typeof api.saveDraft>[1]) => {
-    if (!creds) return Promise.resolve();
-    // Serialise saves so a later edit never lands before an earlier one.
-    const next = saving.current.then(() =>
-      api.saveDraft(creds, body).then(adopt).catch((e: Error) => setError(e.message)),
-    );
-    saving.current = next;
-    return next;
+  // Saves go one at a time, in order; those that pile up while one is in flight are merged.
+  const credsRef = useRef(creds);
+  credsRef.current = creds;
+  const queue = useRef(createSaveQueue(async (body: SaveBody) => {
+    if (!credsRef.current) return;
+    await api.saveDraft(credsRef.current, body).then(adopt).catch((e: Error) => setError(e.message));
+  }));
+  const save = (body: SaveBody) => (creds ? queue.current.push(body) : Promise.resolve());
+  /** Waits for every queued save, showing that we're saving rather than looking frozen. */
+  const settle = async () => {
+    (document.activeElement as HTMLElement | null)?.blur?.(); // commits the field being edited
+    await new Promise((r) => setTimeout(r, 0));
+    setWaiting(true);
+    try {
+      await queue.current.idle();
+    } finally {
+      setWaiting(false);
+    }
   };
   const saveField = (key: DraftFieldKey, value: string) => void save({ changes: { [key]: value } });
   const resetField = (key: DraftFieldKey) => void save({ reset: [key] });
@@ -125,11 +136,7 @@ export function ApplyPage() {
 
   const goTo = async (next: number) => {
     setShowBlockers(false);
-    if (next > step) {
-      (document.activeElement as HTMLElement | null)?.blur?.(); // commits the field being edited
-      await new Promise((r) => setTimeout(r, 0));
-      await saving.current;
-    }
+    if (next > step) await settle();
     updateApply({ step: next });
     window.scrollTo({ top: 0 });
   };
@@ -160,7 +167,7 @@ export function ApplyPage() {
             <h1 id="step-3-h" tabIndex={-1} className="sr-only">Your result</h1>
             <DecisionCard view={result} />
             <div className="flex flex-wrap gap-3">
-              <Button size="lg" icon={Search} onClick={() => { setHandoff(c); navigate("/track"); }}>
+              <Button size="lg" icon={Search} onClick={() => { setHandoff({ ...c, fixable: result.editable }); navigate("/track"); }}>
                 {result.editable ? "Fix items" : "Open my application"}
               </Button>
               <Button size="lg" variant="secondary" icon={Plus} onClick={startAnother}>Start another application</Button>
@@ -291,14 +298,13 @@ export function ApplyPage() {
                 size="lg"
                 className="min-h-[52px] flex-1 rounded-[14px] text-base sm:min-h-11 sm:flex-none sm:rounded-xl sm:px-7"
                 onClick={async () => {
-                  (document.activeElement as HTMLElement | null)?.blur?.();
-                  await new Promise((r) => setTimeout(r, 0));
-                  await saving.current;
+                  await settle();
                   setShowBlockers(true);
                 }}
+                loading={waiting}
                 data-ready={view.details_ready}
               >
-                Continue <ArrowRight className="size-4" aria-hidden />
+                {waiting ? "Saving your details…" : <>Continue <ArrowRight className="size-4" aria-hidden /></>}
               </Button>
             </div>
           </div>

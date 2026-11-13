@@ -6,6 +6,17 @@ import type { Credentials, DraftStreamMessage, DraftView, Slot } from "./types";
 const SLOTS: Slot[] = ["GST", "BANK"];
 const READING_ORDER = ["U1", "U2", "U3"];
 const READING_LABEL: Record<string, string> = { U1: "Uploading", U2: "Identifying the document", U3: "Reading the details" };
+// A move copies the stored file and reuses its reading: no upload, no new reading.
+const MOVING_LABEL: Record<string, string> = { U1: "Moving your file", U2: "Moving your file", U3: "Moving your file" };
+
+/** Storing runs alongside reading, so stages can finish out of order: never move backwards. */
+export function nextActivity(current: SlotActivity | undefined, filename: string, stageId: string, event: string,
+  labels: Record<string, string> = READING_LABEL): SlotActivity {
+  const at = READING_ORDER.indexOf(stageId);
+  const progress = Math.round(((at + (event !== "STARTED" ? 1 : 0.5)) / 3) * 100);
+  if (current && current.progress >= progress) return current;
+  return { filename, stage: labels[stageId] ?? "Working", progress };
+}
 
 /** Accepts a PDF, JPG or PNG up to the size limit; returns the message to show, or null. */
 export function checkFile(file: File, maxBytes: number): string | null {
@@ -54,15 +65,11 @@ export function useSlotReading<V extends DraftView>({ creds, base, maxBytes, ado
   const [slotErrors, setSlotErrors] = useState<Partial<Record<Slot, string>>>({});
   const lastFiles = useRef<Partial<Record<Slot, File>>>({});
 
-  const handler = (slots: Slot[], filename: (s: Slot) => string) => (m: DraftStreamMessage) => {
+  const handler = (slots: Slot[], filename: (s: Slot) => string, labels = READING_LABEL) => (m: DraftStreamMessage) => {
     if (m.type === "stage") {
-      const at = READING_ORDER.indexOf(m.stage_id);
-      const done = m.event !== "STARTED";
       setActivity((a) => {
         const next = { ...a };
-        for (const s of slots) {
-          next[s] = { filename: filename(s), stage: READING_LABEL[m.stage_id] ?? "Working", progress: Math.round(((at + (done ? 1 : 0.5)) / 3) * 100) };
-        }
+        for (const s of slots) next[s] = nextActivity(a[s], filename(s), m.stage_id, m.event, labels);
         return next;
       });
     } else if (m.type === "result") {
@@ -107,8 +114,9 @@ export function useSlotReading<V extends DraftView>({ creds, base, maxBytes, ado
     if (view.files[other]) landing[slot] = view.files[other]!.filename;
     const slots = Object.keys(landing) as Slot[];
     setSlotErrors({});
+    setActivity(Object.fromEntries(slots.map((s) => [s, { filename: landing[s] ?? "", stage: "Moving your file", progress: 10 }])));
     try {
-      await moveDraftFile(creds, slot, handler(slots, (s) => landing[s] ?? ""), base);
+      await moveDraftFile(creds, slot, handler(slots, (s) => landing[s] ?? "", MOVING_LABEL), base);
     } catch (e) {
       setSlotErrors({ [slot]: e instanceof Error ? e.message : "Couldn't move the file." });
     } finally {

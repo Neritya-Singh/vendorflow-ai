@@ -8,7 +8,7 @@ import { ProcessingPanel } from "../components/ProcessingPanel";
 import { FixPanel } from "../components/vendor/FixPanel";
 import { Alert, Button, Card, CardHeader, Field, Input, Spinner } from "../components/ui";
 import { ApiError, api } from "../lib/api";
-import { EMPTY_FIELDS, type Credentials, type VendorFields, type VendorView } from "../lib/types";
+import { EMPTY_FIELDS, type Credentials, type FixView, type VendorFields, type VendorView } from "../lib/types";
 import { useWorkflowRun } from "../lib/useWorkflowRun";
 import { useAppState } from "../state";
 
@@ -128,11 +128,18 @@ export function TrackPage() {
   const [autoError, setAutoError] = useState<string | null>(null);
   const [autoLoading, setAutoLoading] = useState(false);
   const [formKey, setFormKey] = useState(0);
+  const [prefetchedFix, setPrefetchedFix] = useState<Promise<FixView> | null>(null);
 
   // A receipt can hand its credentials to this page in memory (never via URL or storage).
   useEffect(() => {
     if (!handoff) return;
-    const c = handoff;
+    const c: Credentials = { application_id: handoff.application_id, tracking_code: handoff.tracking_code };
+    // The result page knew the case waits on the vendor: open the fix page at the same time.
+    if (handoff.fixable) {
+      const fix = api.openFix(c);
+      fix.catch(() => undefined); // FixPanel shows the error if it is used
+      setPrefetchedFix(fix);
+    }
     setHandoff(null);
     setAutoLoading(true);
     api
@@ -157,6 +164,7 @@ export function TrackPage() {
     setCreds(null);
     setView(null);
     setNotice(null);
+    setPrefetchedFix(null);
   };
 
   if (!view || !creds) {
@@ -180,6 +188,7 @@ export function TrackPage() {
   }
 
   const onSaved = (v: VendorView) => {
+    setPrefetchedFix(null); // a re-check replaced the fix it belonged to
     setView(v);
     setFormKey((k) => k + 1);
     setNotice("Your update was checked and saved. The latest decision is shown below.");
@@ -203,7 +212,7 @@ export function TrackPage() {
             {notice ? <Alert tone="success">{notice}</Alert> : null}
             <DecisionCard view={view} />
             {view.editable ? (
-              <FixPanel key={formKey} creds={creds} onSaved={onSaved} />
+              <FixPanel key={formKey} creds={creds} onSaved={onSaved} prefetched={prefetchedFix} />
             ) : view.retry_available ? (
               <RetryCard key={formKey} view={view} creds={creds} onSaved={onSaved} />
             ) : null}

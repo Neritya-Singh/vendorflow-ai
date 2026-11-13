@@ -342,7 +342,10 @@ def bank_reuse_check(v, application_id: str, registry) -> "CheckResult":
 def records_screening(registry):
     """Pipeline hook (ProcessingPipeline(screening=...)): returns R12 and R15."""
     def screen(v, application_id: str):
-        return [gstin_check(v, application_id, registry), bank_reuse_check(v, application_id, registry)]
+        # Independent lookups: run them at the same time (each fails closed on its own).
+        from .persistence import parallel
+        return parallel(lambda: gstin_check(v, application_id, registry),
+                        lambda: bank_reuse_check(v, application_id, registry))
     return screen
 
 

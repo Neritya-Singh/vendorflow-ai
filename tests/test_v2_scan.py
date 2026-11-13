@@ -84,7 +84,7 @@ def test_clear_cheque_photo_is_read_once_grounded_by_ocr_and_approved(counted):
     c, view, events, elapsed = photo_draft(client, "photo_cheque")
     bank = view["files"]["BANK"]
     assert bank["status"] == "read" and bank["message"] == "Read: account holder, account number, IFSC"
-    assert [e["stage_id"] for e in events if e["type"] == "stage" and e["event"] == "COMPLETED"] == ["U1", "U2", "U3"]
+    assert sorted(e["stage_id"] for e in events if e["type"] == "stage" and e["event"] == "COMPLETED") == ["U1", "U2", "U3"]
     assert elapsed < 10, elapsed
     holder = next(f for f in view["fields"] if f["key"] == "bank_holder")
     assert holder["value"] == truth("photo_cheque")["bank_holder"] and holder["status"] == "document"

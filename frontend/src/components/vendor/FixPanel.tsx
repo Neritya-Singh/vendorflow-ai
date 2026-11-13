@@ -1,6 +1,7 @@
 import { CheckCircle2, Circle, RefreshCw, RotateCcw, Send } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { api, submitFix } from "../../lib/api";
+import { createSaveQueue, type SaveBody } from "../../lib/saveQueue";
 import type { Contact, Credentials, DraftFieldKey, FixItem, FixView, Slot, VendorView } from "../../lib/types";
 import { useSlotReading } from "../../lib/useSlotReading";
 import { useWorkflowRun } from "../../lib/useWorkflowRun";
@@ -25,12 +26,17 @@ function itemDone(item: FixItem, view: FixView): boolean {
  * (same live reading and wrong-slot warning as the first upload) or a field with its
  * source tag. Re-check reuses every reading already made; no full typed form.
  */
-export function FixPanel({ creds, onSaved }: { creds: Credentials; onSaved: (v: VendorView) => void }) {
+export function FixPanel({ creds, onSaved, prefetched }: {
+  creds: Credentials;
+  onSaved: (v: VendorView) => void;
+  /** Started together with the status request, so the page needn't wait for one then the other. */
+  prefetched?: Promise<FixView> | null;
+}) {
   const { meta } = useAppState();
   const { state: run, start, reset } = useWorkflowRun();
   const [view, setView] = useState<FixView | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const saving = useRef<Promise<unknown>>(Promise.resolve());
+  const [waiting, setWaiting] = useState(false);
   const contactRef = useRef<Contact | null>(null);
   const headingId = useId();
   const fieldsId = useId();
@@ -44,17 +50,17 @@ export function FixPanel({ creds, onSaved }: { creds: Credentials; onSaved: (v: 
 
   useEffect(() => {
     let cancelled = false;
-    api.openFix(creds).then((v) => !cancelled && adopt(v)).catch((e: Error) => !cancelled && setError(e.message));
+    (prefetched ?? api.openFix(creds)).then((v) => !cancelled && adopt(v)).catch((e: Error) => !cancelled && setError(e.message));
     return () => {
       cancelled = true;
     };
-  }, [creds, adopt]);
+  }, [creds, adopt, prefetched]);
 
-  const save = (body: Parameters<typeof api.saveFix>[1]) => {
-    const next = saving.current.then(() => api.saveFix(creds, body).then(adopt).catch((e: Error) => setError(e.message)));
-    saving.current = next;
-    return next;
-  };
+  // Saves go one at a time, in order; those that pile up while one is in flight are merged.
+  const queue = useRef(createSaveQueue(async (body: SaveBody) => {
+    await api.saveFix(creds, body).then(adopt).catch((e: Error) => setError(e.message));
+  }));
+  const save = (body: SaveBody) => queue.current.push(body);
   const saveField = (key: DraftFieldKey, value: string) => void save({ changes: { [key]: value } });
   const resetField = (key: DraftFieldKey) => void save({ reset: [key] });
   const saveContact = (patch: Partial<Contact>) => {
@@ -66,7 +72,12 @@ export function FixPanel({ creds, onSaved }: { creds: Credentials; onSaved: (v: 
   const recheck = async () => {
     (document.activeElement as HTMLElement | null)?.blur?.();
     await new Promise((r) => setTimeout(r, 0));
-    await saving.current;
+    setWaiting(true);
+    try {
+      await queue.current.idle();
+    } finally {
+      setWaiting(false);
+    }
     const result = await start((cb) => submitFix(creds, cb));
     if (result) onSaved(result);
   };
@@ -154,9 +165,9 @@ export function FixPanel({ creds, onSaved }: { creds: Credentials; onSaved: (v: 
       {error ? <Alert tone="error">{error}</Alert> : null}
       <div className="flex flex-col gap-3 border-t border-line-soft pt-4 sm:flex-row sm:items-center sm:justify-between">
         <span className="text-[13px] text-muted" aria-live="polite">
-          {busy ? "Reading your document…" : view.ready ? "Ready to check again." : view.blockers[0]}
+          {busy ? "Reading your document…" : waiting ? "Saving your changes…" : view.ready ? "Ready to check again." : view.blockers[0]}
         </span>
-        <Button size="lg" icon={Send} disabled={!view.ready || busy} onClick={() => void recheck()}>Re-check</Button>
+        <Button size="lg" icon={Send} disabled={!view.ready || busy} loading={waiting} onClick={() => void recheck()}>Re-check</Button>
       </div>
     </section>
   );

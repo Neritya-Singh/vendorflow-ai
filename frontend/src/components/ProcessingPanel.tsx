@@ -1,4 +1,4 @@
-import { Radio, RotateCcw, Search } from "lucide-react";
+import { Loader2, Radio, RotateCcw, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { formatDuration } from "../lib/format";
 import { stageProgress } from "../lib/stages";
@@ -31,11 +31,12 @@ export function ProcessingPanel({ run, title, onRetry, onCheckStatus }: {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h2 className="text-[15px] font-semibold text-slate-900">{title}</h2>
-            <p className="mt-0.5 text-[13px] text-slate-500">
+            <p className="mt-0.5 flex items-center gap-1.5 text-[13px] text-slate-500" aria-live="polite">
+              {active ? <Loader2 className="size-3.5 shrink-0 animate-spin text-navy-600" aria-hidden /> : null}
               {run.phase === "sending"
-                ? "Uploading your details and PDFs securely…"
+                ? "Checking your application…"
                 : run.phase === "running"
-                  ? "Each step below updates when the server reports it."
+                  ? "Checking your application… each step below updates as it finishes."
                   : run.phase === "done"
                     ? "All steps reported by the server."
                     : "Processing stopped before a result was returned."}

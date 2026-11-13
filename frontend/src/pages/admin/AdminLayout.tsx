@@ -2,6 +2,7 @@ import { CheckCircle2, Lock, LogOut, Search, ShieldCheck } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { BootErrorBanner } from "../../components/AppShell";
+import { clearDocumentCache } from "../../components/admin/DocumentViewer";
 import { Alert, Button, Card, Field, Input, Spinner, cx } from "../../components/ui";
 import { ApiError, api, setCsrf } from "../../lib/api";
 import { useAppState } from "../../state";
@@ -166,6 +167,7 @@ export function AdminLayout() {
   const signOut = useCallback(async () => {
     try {
       await api.adminLogout();
+      clearDocumentCache();
     } finally {
       setCsrf(null);
       setStatus("out");

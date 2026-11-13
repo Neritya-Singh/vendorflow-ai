@@ -197,7 +197,15 @@ class _Bucket:
         return SimpleNamespace(path=path)
 
     def download(self, path):
+        self.storage.downloads += 1
         return self.storage.files[path]
+
+    def copy(self, from_path, to_path):
+        if to_path in self.storage.files:
+            raise RuntimeError("object exists")
+        self.storage.files[to_path] = self.storage.files[from_path]
+        self.storage.copies += 1
+        return {"path": to_path}
 
     def remove(self, paths):
         for path in paths:
@@ -207,6 +215,8 @@ class _Bucket:
 class _Storage:
     def __init__(self):
         self.files: dict[str, bytes] = {}
+        self.downloads = 0  # counters for the offline speed tests
+        self.copies = 0
 
     def from_(self, bucket):
         if bucket != "vendor-documents":

@@ -1,4 +1,4 @@
-import { ExternalLink, FileWarning, Minus, Plus } from "lucide-react";
+import { ExternalLink, FileWarning, Loader2, Minus, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../../lib/api";
 import { cx } from "../ui";
@@ -12,6 +12,67 @@ export interface ViewerDoc {
 }
 
 const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
+// Session cache: a run's documents never change, so each tab's page count and page images
+// are fetched once, when the reviewer first opens that tab, and kept until sign-out.
+const pageCounts = new Map<string, Promise<number>>();
+const pageImages = new Map<string, Promise<string>>();
+
+/** Cache key: the exact document a run used (tab keys like "own-GST" repeat across cases). */
+const docId = (applicationId: string, runId: string, docType: string) => `${applicationId}/${runId}/${docType}`;
+
+function countFor(doc: ViewerDoc): Promise<number> {
+  const key = docId(doc.applicationId, doc.runId, doc.docType);
+  let found = pageCounts.get(key);
+  if (!found) {
+    found = api.documentPages(doc.applicationId, doc.runId, doc.docType).then((r) => r.pages);
+    found.catch(() => pageCounts.delete(key)); // a failure is retried next time
+    pageCounts.set(key, found);
+  }
+  return found;
+}
+
+function imageFor(applicationId: string, runId: string, docType: string, page: number): Promise<string> {
+  const key = `${docId(applicationId, runId, docType)}#${page}`;
+  let found = pageImages.get(key);
+  if (!found) {
+    found = api.documentPageBlob(applicationId, runId, docType, page).then((b) => URL.createObjectURL(b));
+    found.catch(() => pageImages.delete(key));
+    pageImages.set(key, found);
+  }
+  return found;
+}
+
+/** Forget every cached page (call on sign-out). */
+export function clearDocumentCache() {
+  for (const url of pageImages.values()) void url.then((u) => URL.revokeObjectURL(u)).catch(() => undefined);
+  pageImages.clear();
+  pageCounts.clear();
+}
+
+function PageImage({ doc, page, count, onUnauthorized }: { doc: ViewerDoc; page: number; count: number; onUnauthorized: (e: unknown) => boolean }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const { applicationId, runId, docType } = doc;
+  useEffect(() => {
+    let live = true;
+    setSrc(null);
+    setFailed(false);
+    imageFor(applicationId, runId, docType, page).then((u) => live && setSrc(u)).catch((e) => live && !onUnauthorized(e) && setFailed(true));
+    return () => {
+      live = false;
+    };
+  }, [applicationId, runId, docType, page, onUnauthorized]);
+  if (failed) return <p className="text-sm text-muted">Page {page} couldn't be shown. Use “Original” to open it.</p>;
+  if (!src) {
+    return (
+      <div className="grid aspect-[1/1.3] w-full place-items-center rounded-md bg-white text-[13px] text-muted shadow-[0_1px_3px_rgba(16,24,40,0.12)]">
+        Loading page {page}…
+      </div>
+    );
+  }
+  return <img src={src} alt={`${doc.label}, page ${page} of ${count}`} className="w-full rounded-md bg-white shadow-[0_1px_3px_rgba(16,24,40,0.12)]" />;
+}
 
 /**
  * Inline evidence viewer. Pages are rendered to PNG by the server from the exact,
@@ -34,9 +95,8 @@ export function DocumentViewer({ docs, className, onUnauthorized }: {
 
   useEffect(() => {
     if (!active || pages[active.key] !== undefined) return;
-    api
-      .documentPages(active.applicationId, active.runId, active.docType)
-      .then((r) => setPages((p) => ({ ...p, [active.key]: r.pages })))
+    countFor(active)
+      .then((n) => setPages((p) => ({ ...p, [active.key]: n })))
       .catch((e) => {
         if (!onUnauthorized(e)) setPages((p) => ({ ...p, [active.key]: "error" }));
       });
@@ -88,16 +148,11 @@ export function DocumentViewer({ docs, className, onUnauthorized }: {
         ) : count === "error" ? (
           <p className="text-sm text-muted">This document can't be previewed here. Use “Original” to open it.</p>
         ) : count === undefined ? (
-          <p className="text-sm text-muted">Loading document…</p>
+          <p className="flex items-center gap-2 text-sm text-muted"><Loader2 className="size-4 animate-spin" aria-hidden /> Loading document…</p>
         ) : (
           <div className={cx("flex flex-col items-center gap-4", scale <= 1 && "mx-auto")} style={{ width: 640 * scale, maxWidth: scale <= 1 ? "100%" : undefined }}>
             {Array.from({ length: count }, (_, i) => (
-              <img
-                key={`${active.key}-${i}`}
-                src={api.documentPageUrl(active.applicationId, active.runId, active.docType, i + 1)}
-                alt={`${active.label}, page ${i + 1} of ${count}`}
-                className="w-full rounded-md bg-white shadow-[0_1px_3px_rgba(16,24,40,0.12)]"
-              />
+              <PageImage key={`${active.key}-${i}`} doc={active} page={i + 1} count={count} onUnauthorized={onUnauthorized} />
             ))}
           </div>
         )}

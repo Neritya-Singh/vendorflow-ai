@@ -10,6 +10,9 @@ import hashlib
 import re
 import os
 import secrets
+import threading
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -52,6 +55,62 @@ def prepare_intake() -> PreparedIntake:
     return PreparedIntake("VF-" + uuid4().hex[:12].upper(), secrets.token_urlsafe(24))
 
 
+def parallel(*calls):
+    """Run independent Supabase calls at the same time; results in call order.
+    The first exception is raised after every call has finished."""
+    if len(calls) <= 1:
+        return [call() for call in calls]
+    with ThreadPoolExecutor(max_workers=min(len(calls), 6), thread_name_prefix="vf-io") as pool:
+        futures = [pool.submit(call) for call in calls]
+        return [f.result() for f in futures]
+
+
+class DocumentCache:
+    """Process-local copies of document bytes this server verified itself (it hashed them
+    on upload, or downloaded them and the SHA-256 matched the immutable row), plus the
+    immutable run -> document row lookups. Bounded; least recently used goes first.
+    A cache hit serves exactly the bytes whose hash the database records."""
+
+    def __init__(self, max_bytes: int = 64 * 1024 * 1024, max_rows: int = 512):
+        self._lock = threading.Lock()
+        self._files: OrderedDict[str, bytes] = OrderedDict()
+        self._rows: OrderedDict[tuple, dict] = OrderedDict()
+        self._size = 0
+        self.max_bytes, self.max_rows = max_bytes, max_rows
+
+    def get(self, sha256: str) -> bytes | None:
+        with self._lock:
+            content = self._files.get(sha256)
+            if content is not None:
+                self._files.move_to_end(sha256)
+            return content
+
+    def put(self, content: bytes, sha256: str | None = None) -> None:
+        digest = hashlib.sha256(content).hexdigest()
+        if (sha256 and digest != sha256) or len(content) > self.max_bytes:
+            return
+        with self._lock:
+            if digest in self._files:
+                self._files.move_to_end(digest)
+                return
+            self._files[digest] = content
+            self._size += len(content)
+            while self._size > self.max_bytes:
+                _key, old = self._files.popitem(last=False)
+                self._size -= len(old)
+
+    def row(self, key: tuple) -> dict | None:
+        with self._lock:
+            found = self._rows.get(key)
+            return dict(found) if found else None
+
+    def put_row(self, key: tuple, row: dict) -> None:
+        with self._lock:
+            self._rows[key] = dict(row)
+            while len(self._rows) > self.max_rows:
+                self._rows.popitem(last=False)
+
+
 @dataclass
 class ApplicationReceipt:
     application_id: str
@@ -66,8 +125,9 @@ def _token_digest(application_id: str, token: str) -> str:
 class SupabaseRepository:
     BUCKET = "vendor-documents"
 
-    def __init__(self, client):
+    def __init__(self, client, cache: DocumentCache | None = None):
         self.client = client
+        self.cache = cache  # opt-in; see DocumentCache
 
     @classmethod
     def from_env(cls) -> "SupabaseRepository":
@@ -117,6 +177,21 @@ class SupabaseRepository:
         if not response.data:
             raise UnauthorizedTracking("Application ID or tracking code is incorrect.")
         return response.data[0]
+
+    def find_application(self, application_id: str) -> dict | None:
+        """The application row, or None. One round trip."""
+        rows = self.client.table("applications").select("*").eq("id", application_id).limit(1).execute().data
+        return rows[0] if rows else None
+
+    @staticmethod
+    def check_tracking(record: dict, application_id: str, tracking_code: str) -> dict:
+        """Constant-time token check on an already-loaded row; returns it without the hash."""
+        expected = str(record.get("tracking_token_hash") or "")
+        if not secrets.compare_digest(expected, _token_digest(application_id, tracking_code)):
+            raise UnauthorizedTracking("Application ID or tracking code is incorrect.")
+        record = dict(record)
+        record.pop("tracking_token_hash", None)
+        return record
 
     def authenticate_vendor(self, application_id: str, tracking_code: str) -> dict:
         # Constant-time compare and unpredictable token; no publicly queryable endpoint.
@@ -183,18 +258,63 @@ class SupabaseRepository:
             raise PersistenceError("Referenced PDF version is no longer available.")
         return response.data[0]
 
+    def application_documents(self, application_id: str) -> list[dict]:
+        """Every document row of one application (immutable rows). One round trip."""
+        return (self.client.table("documents").select("*")
+                .eq("application_id", application_id).execute().data)
+
+    def download_many(self, rows: list[dict]) -> list[PDFInput]:
+        """Hash-verified contents, downloaded in parallel (cache hits need no download)."""
+        return parallel(*[(lambda r=r: self._download_verified(r)) for r in rows])
+
+    def copy_document(self, application_id: str, source: dict, doc_type: str, version: int) -> dict:
+        """A new immutable document version for `doc_type` holding the same bytes as
+        `source`: the storage object is copied server-side (no re-upload) and a new row is
+        INSERTED. Saved rows are never changed. Same compensation as an upload."""
+        if doc_type not in ("GST", "BANK") or source.get("application_id") != application_id:
+            raise PersistenceError("Referenced document is not part of this application.")
+        ext = os.path.splitext(source["storage_path"])[1] or ".pdf"
+        path = f"{application_id}/{doc_type}/v{version}-{uuid4().hex}{ext}"
+        copied = False
+        try:
+            self.client.storage.from_(self.BUCKET).copy(source["storage_path"], path)
+            copied = True
+            row = {"application_id": application_id, "doc_type": doc_type, "storage_path": path,
+                   "file_sha256": source["file_sha256"], "version": version, "filename": source["filename"]}
+            response = self.client.table("documents").insert(row).execute()
+            if not response.data:
+                raise RuntimeError("No confirmed document metadata row")
+            return response.data[0]
+        except Exception as exc:
+            if copied:
+                try:
+                    confirmed = (self.client.table("documents").select("*")
+                                 .eq("storage_path", path).limit(1).execute().data)
+                    if confirmed and confirmed[0]["file_sha256"] == source["file_sha256"]:
+                        return confirmed[0]
+                except Exception:
+                    pass
+                try:
+                    self.client.storage.from_(self.BUCKET).remove([path])
+                except Exception:
+                    pass
+            raise PersistenceError("The file could not be moved. Try again.") from exc
+
     @staticmethod
     def _manifest_entry(row: dict) -> dict:
         return {key: row[key] for key in (
             "id", "doc_type", "version", "file_sha256", "storage_path"
         )}
 
-    def upload_document(self, application_id: str, doc_type: str, uploaded: PDFInput) -> dict:
+    def upload_document(self, application_id: str, doc_type: str, uploaded: PDFInput,
+                        version: int | None = None) -> dict:
+        """`version`: the next version when the caller already knows it (saves a lookup)."""
         if doc_type not in ("GST", "BANK"):
             raise ValueError("Unknown PDF document type")
         read_pdf(uploaded)
-        old = self._latest_document_row(application_id, doc_type)
-        version = int(old["version"]) + 1 if old else 1
+        if version is None:
+            old = self._latest_document_row(application_id, doc_type)
+            version = int(old["version"]) + 1 if old else 1
         sha = hashlib.sha256(uploaded.content).hexdigest()
         path = f"{application_id}/{doc_type}/v{version}-{uuid4().hex}.pdf"
         stored = False
@@ -216,6 +336,8 @@ class SupabaseRepository:
             response = self.client.table("documents").insert(row).execute()
             if not response.data:
                 raise RuntimeError("No confirmed document metadata row")
+            if self.cache is not None:
+                self.cache.put(uploaded.content, sha)
             return response.data[0]
         except Exception as exc:
             if stored:
@@ -238,12 +360,17 @@ class SupabaseRepository:
             ) from exc
 
     def _download_verified(self, row: dict) -> PDFInput:
+        cached = self.cache.get(row["file_sha256"]) if self.cache is not None else None
+        if cached is not None:  # bytes this server already verified against the same hash
+            return PDFInput(row["filename"], cached)
         try:
             content = self.client.storage.from_(self.BUCKET).download(row["storage_path"])
             if not isinstance(content, bytes):
                 content = content.content
             if hashlib.sha256(content).hexdigest() != row["file_sha256"]:
                 raise PersistenceError("Stored PDF integrity check failed.")
+            if self.cache is not None:
+                self.cache.put(content, row["file_sha256"])
             return PDFInput(row["filename"], content)
         except Exception as exc:
             raise PersistenceError("Could not retrieve a verified stored PDF. No decision was issued.") from exc
@@ -283,7 +410,12 @@ class SupabaseRepository:
         return pdf
 
     def load_run_document(self, application_id: str, run_id: str, doc_type: str) -> PDFInput | None:
-        """Read specific historical evidence after staff/vendor authorization."""
+        """Read specific historical evidence after staff/vendor authorization. Runs and
+        document rows are immutable, so a resolved (run, type) -> row is cached."""
+        key = ("run-doc", application_id, run_id, doc_type)
+        cached = self.cache.row(key) if self.cache is not None else None
+        if cached is not None:
+            return self._download_verified(cached)
         resp = (self.client.table("runs").select("id,document_manifest")
                 .eq("id", run_id).eq("application_id", application_id).limit(1).execute())
         if not resp.data:
@@ -299,6 +431,8 @@ class SupabaseRepository:
             row[k] != entries[0][k] for k in ("doc_type", "version", "file_sha256", "storage_path")
         ):
             raise PersistenceError("Historical PDF does not match its recorded version.")
+        if self.cache is not None:
+            self.cache.put_row(key, row)
         return self._download_verified(row)
 
     def saved_result(self, application_id: str) -> WorkflowResult | None:

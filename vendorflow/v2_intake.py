@@ -16,6 +16,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 from collections.abc import Callable
 from copy import deepcopy
@@ -27,7 +29,7 @@ from . import v2_policy as v2
 from .models import BankExtraction, ExtractedDocuments, GSTExtraction, StageEvent, VendorSubmission, WorkflowResult
 from .pdf_reader import PDFInput, ReadPDF
 from .persistence import (
-    PersistenceError, SupabaseRepository, UnauthorizedTracking, _token_digest,
+    PersistenceError, SupabaseRepository, UnauthorizedTracking, _token_digest, parallel,
 )
 from .pipeline import ProcessingPipeline, StageCallback
 from .v2_scan import OCR_UNAVAILABLE, ReadDocument, content_type, file_kind, read_document, strip_metadata
@@ -143,17 +145,20 @@ def provider_extract(extractor, gst_text: str, bank_text: str,
     return extractor.extract(gst_text, bank_text)
 
 
-def store_document(repo: SupabaseRepository, application_id: str, slot: str, upload: PDFInput) -> dict:
+def store_document(repo: SupabaseRepository, application_id: str, slot: str, upload: PDFInput,
+                   version: int | None = None) -> dict:
     """v2 counterpart of SupabaseRepository.upload_document for PDF, JPG and PNG files
-    (the original file is kept as evidence; same versioning, hash and compensation)."""
+    (the original file is kept as evidence; same versioning, hash and compensation).
+    `version`: the next version when the caller already knows it (saves a lookup)."""
     if slot not in SLOTS:
         raise ValueError("Unknown document type")
     kind = file_kind(upload.filename, upload.content)
     if kind == "pdf":
-        return repo.upload_document(application_id, slot, upload)
+        return repo.upload_document(application_id, slot, upload, version=version)
     upload = PDFInput(upload.filename, strip_metadata(kind, upload.content))  # no EXIF/GPS in evidence
-    old = repo._latest_document_row(application_id, slot)
-    version = int(old["version"]) + 1 if old else 1
+    if version is None:
+        old = repo._latest_document_row(application_id, slot)
+        version = int(old["version"]) + 1 if old else 1
     sha = hashlib.sha256(upload.content).hexdigest()
     ext = os.path.splitext(upload.filename.casefold())[1]
     path = f"{application_id}/{slot}/v{version}-{uuid4().hex}{ext}"
@@ -168,6 +173,8 @@ def store_document(repo: SupabaseRepository, application_id: str, slot: str, upl
         response = repo.client.table("documents").insert(row).execute()
         if not response.data:
             raise RuntimeError("No confirmed document metadata row")
+        if getattr(repo, "cache", None) is not None:
+            repo.cache.put(upload.content, sha)
         return response.data[0]
     except Exception as exc:
         if stored:
@@ -379,8 +386,14 @@ class DraftService:
         self.extractor_factory = extractor_factory
         self.pipeline_options = dict(pipeline_options or {})
 
+    # P1 speed: every Supabase round trip from this laptop costs 250-600 ms, so the
+    # endpoints pass in what they already loaded (the authenticated application row, or
+    # the fix context) and independent reads run in parallel. Writes stay
+    # compare-and-swap guarded; a lost race reloads and retries as before.
+
     # --- rows
     def create_draft(self, application_id: str, tracking_code: str) -> dict:
+        """Creates the draft row; returns the application row (without the token hash)."""
         if not (re.fullmatch(r"VF-[0-9A-F]{12}", application_id) and len(tracking_code) >= 20):
             raise UnauthorizedTracking("Application ID or tracking code is incorrect.")
         row = {"id": application_id, "payload_json": {"draft": empty_draft()},
@@ -390,28 +403,29 @@ class DraftService:
             response = self.client.table("applications").insert(row).execute()
             if not response.data:
                 raise RuntimeError("not acknowledged")
+            return self.repo.check_tracking(response.data[0], application_id, tracking_code)
         except Exception as exc:
             # Lost acknowledgement or a parallel first upload: the row may exist already.
             try:
-                self.repo.authenticate_vendor(application_id, tracking_code)
+                return self.repo.authenticate_vendor(application_id, tracking_code)
             except UnauthorizedTracking:
                 raise PersistenceError("Your application could not be started. Try again.") from exc
-        return self.draft(application_id)
 
-    def draft(self, application_id: str) -> dict:
-        app = self.repo._application(application_id)
+    def draft(self, application_id: str, app: dict | None = None) -> dict:
+        app = app if app is not None else self.repo._application(application_id)
         if app.get("latest_run_id"):
             raise DraftSubmitted("This application was already submitted. Open it to see its status.")
         payload = app.get("payload_json") or {}
         return deepcopy(payload.get("draft") or empty_draft())
 
-    def _load(self, application_id: str, kind: str) -> tuple[dict, dict, Callable]:
+    def _load(self, application_id: str, kind: str, app: dict | None = None,
+              ctx: tuple | None = None) -> tuple[dict, dict, Callable]:
         """(application row, working copy, compare-and-swap filter) for a draft or a fix."""
         if kind == "draft":
-            draft = self.draft(application_id)
+            draft = self.draft(application_id, app)
             rev = str(int(draft.get("rev") or 0))
-            return ({}, draft, lambda q: q.eq("payload_json->draft->>rev", rev).is_("latest_run_id", "null"))
-        app, run, _review = self._fix_context(application_id)
+            return (app or {}, draft, lambda q: q.eq("payload_json->draft->>rev", rev).is_("latest_run_id", "null"))
+        app, run, _review = ctx or self._fix_context(application_id, app)
         stored = (app.get("payload_json") or {}).get("fix")
         if stored and stored.get("base_run_id") == app["latest_run_id"]:
             fix = deepcopy(stored)
@@ -423,17 +437,20 @@ class DraftService:
             return app, fix, lambda q: q.eq("latest_run_id", base).eq("payload_json->fix->>rev", rev)
         return app, fix, lambda q: q.eq("latest_run_id", base).is_("payload_json->fix", "null")
 
-    def _mutate(self, application_id: str, change: Callable[[dict], None], kind: str = "draft") -> dict:
-        """Compare-and-swap on the working copy's rev so parallel uploads never lose each other's update."""
-        for _attempt in range(6):
-            app, draft, guard = self._load(application_id, kind)
+    def _mutate(self, application_id: str, change: Callable[[dict], None], kind: str = "draft",
+                app: dict | None = None, ctx: tuple | None = None) -> dict:
+        """Compare-and-swap on the working copy's rev so parallel uploads never lose each other's update.
+        The first attempt uses the rows the caller already loaded; a lost race reloads."""
+        for attempt in range(6):
+            app_row, draft, guard = self._load(application_id, kind, app if attempt == 0 else None,
+                                               ctx if attempt == 0 else None)
             rev = int(draft.get("rev") or 0)
             change(draft)
             draft["rev"] = rev + 1
             if kind == "draft":
                 payload = {"draft": draft}
             else:  # the submitted values stay as they are; the fix sits beside them
-                payload = {k: v for k, v in (app.get("payload_json") or {}).items() if k != "fix"}
+                payload = {k: v for k, v in (app_row.get("payload_json") or {}).items() if k != "fix"}
                 payload["fix"] = draft
             query = self.client.table("applications").update({"payload_json": payload, "updated_at": _now()})
             response = guard(query.eq("id", application_id)).execute()
@@ -441,18 +458,28 @@ class DraftService:
                 return draft
         raise PersistenceError("Your application is being updated in another tab. Refresh and try again.")
 
-    def _count_documents(self, application_id: str) -> int:
-        return len(self.client.table("documents").select("id").eq("application_id", application_id).execute().data)
+    @staticmethod
+    def _next_version(docs: list[dict], slot: str) -> int:
+        return max((int(d["version"]) for d in docs if d.get("doc_type") == slot), default=0) + 1
 
     # --- fixes (B7 part 1): the vendor changes only the requested items of a SUBMITTED
     # application. The fix lives in payload_json["fix"] beside the submitted values; the
     # run trigger replaces the payload on re-check, which drops it. Nothing else changes.
-    def _fix_context(self, application_id: str) -> tuple[dict, dict, dict | None]:
-        app = self.repo._application(application_id)
+    def _fix_context(self, application_id: str, app: dict | None = None) -> tuple[dict, dict, dict | None]:
+        if app is None:
+            app, runs, reviews = parallel(lambda: self.repo._application(application_id),
+                                          lambda: self.repo.runs_for_application(application_id),
+                                          lambda: self.repo.review_history(application_id))
+        else:
+            runs, reviews = parallel(lambda: self.repo.runs_for_application(application_id),
+                                     lambda: self.repo.review_history(application_id))
+        return self.fix_context_from(app, runs, reviews)
+
+    @staticmethod
+    def fix_context_from(app: dict, runs: list[dict], reviews: list[dict]) -> tuple[dict, dict, dict | None]:
+        """Validates already-loaded rows: only a pending case waiting on the vendor can be fixed."""
         if app.get("current_status") != "PENDING" or not app.get("latest_run_id"):
             raise DraftSubmitted("This application has a final decision and can no longer be changed.")
-        runs = self.repo.runs_for_application(application_id)
-        reviews = self.repo.review_history(application_id)
         run = runs[0] if runs else None
         review = reviews[0] if reviews else None
         if not run or run.get("id") != app["latest_run_id"]:
@@ -467,17 +494,25 @@ class DraftService:
         payload = run.get("payload_json") or {}
         extracted = run.get("extracted_json") or {}
         outage = v2.extraction_outage(run)
+        docs = self.repo.application_documents(application_id)  # rows + count in one round trip
+        by_id = {str(d["id"]): d for d in docs}
         fix = empty_draft()
-        fix.update(base_run_id=app["latest_run_id"], doc_base=self._count_documents(application_id),
+        fix.update(base_run_id=app["latest_run_id"], doc_base=len(docs),
                    declaration=bool(payload.get("declaration")), declared_at=str(payload.get("declared_at") or ""),
                    contact={"name": str(payload.get("contact_name") or ""), "email": str(payload.get("contact_email") or ""),
                             "phone": str(payload.get("contact_phone") or "")})
+        committed = []
         for item in run.get("document_manifest") or []:
             slot = item.get("doc_type")
             if slot not in SLOTS:
                 continue
-            row = self._own_document(application_id, str(item["id"]))
-            read = read_document(self.repo._download_verified(row))
+            row = by_id.get(str(item["id"]))
+            if row is None:
+                raise PersistenceError("Referenced PDF version is no longer available.")
+            committed.append((slot, row))
+        contents = self.repo.download_many([row for _slot, row in committed])
+        for (slot, row), pdf in zip(committed, contents):
+            read = read_document(pdf)
             fields = (extracted.get("gst" if slot == "GST" else "bank") or {})
             kind = classify_document(read)
             entry = {"document_id": str(row["id"]), "version": int(row["version"]), "filename": row.get("filename"),
@@ -491,8 +526,7 @@ class DraftService:
                 entry["status"] = "unavailable"  # not cached: re-check reads it again
             else:
                 fix["cache"][f"{slot}:{row['file_sha256']}"] = {"text_sha": text_sha(read.text), "fields": dict(fields)}
-                entry["status"] = "read" if any(str(v or "").strip() for k, v in fields.items() if k != "address") \
-                    else "nothing_found"
+                entry["status"] = _fields_status(fields)
             fix["files"][slot] = entry
         # What the vendor submitted stays; a value that differs from its document is an override.
         view = extracted_view(fix)
@@ -503,11 +537,11 @@ class DraftService:
                 fix["overrides"][field] = value
         return fix
 
-    def fix(self, application_id: str) -> tuple[dict, list[dict]]:
+    def fix(self, application_id: str, app: dict | None = None, ctx: tuple | None = None) -> tuple[dict, list[dict]]:
         """(working copy, requested items). Opening it stores nothing."""
-        app, fix, _guard = self._load(application_id, "fix")
-        _app, run, review = self._fix_context(application_id)
-        return fix, v2.fix_items(run, review)
+        ctx = ctx or self._fix_context(application_id, app)
+        _app, fix, _guard = self._load(application_id, "fix", ctx=ctx)
+        return fix, v2.fix_items(ctx[1], ctx[2])
 
     def fix_items(self, application_id: str) -> list[dict]:
         _app, run, review = self._fix_context(application_id)
@@ -524,55 +558,75 @@ class DraftService:
 
     def _process(self, application_id: str, slot: str, pdf: PDFInput, read: ReadPDF, cache: dict,
                  emit: Callable[[str, str, str], None], doc_base: int = 0) -> tuple[dict, dict]:
-        """Store, identify and read ONE file for `slot`. Returns (file entry, new cache entries)."""
-        if self._count_documents(application_id) - doc_base >= MAX_DRAFT_DOCUMENTS:
+        """Store, identify and read ONE file for `slot`. Returns (file entry, new cache entries).
+
+        Storing and reading run at the same time (the reading needs only the local bytes).
+        A file that is in the wrong slot is read AS WHAT IT IS, so "Move it" can reuse the
+        reading without another provider call."""
+        docs = self.repo.application_documents(application_id)  # count + next version, one round trip
+        if len(docs) - doc_base >= MAX_DRAFT_DOCUMENTS:
             raise DraftLimit("Too many uploads for this application. Contact the finance team if you need help.")
-        emit("U1", "STARTED", "")
-        row = store_document(self.repo, application_id, slot, pdf)
-        emit("U1", "COMPLETED", "")
-        emit("U2", "STARTED", "")
-        kind = classify_document(read)
-        emit("U2", "COMPLETED", "")
-        entry = {"document_id": str(row["id"]), "version": int(row["version"]), "filename": pdf.filename,
-                 "sha256": row["file_sha256"], "pages": read.pages, "kind": kind, "uploaded_at": _now()}
+        sha = hashlib.sha256(pdf.content).hexdigest()
         new_cache: dict = {}
-        if not read.readable and read.issue == OCR_UNAVAILABLE:
-            entry["status"] = "unavailable"  # our side, not the vendor's file
-            emit("U3", "FAILED", "")
-        elif not read.readable:
-            entry["status"] = "unreadable"
-            emit("U3", "SKIPPED", "")
-        elif kind and kind != slot:
-            entry["status"] = "wrong_slot"  # no provider call for a file in the wrong slot
-            emit("U3", "SKIPPED", "")
-        else:
-            key = f"{slot}:{entry['sha256']}"
-            emit("U3", "STARTED", "")
-            hit = cache.get(key)
-            if hit and hit.get("text_sha") == text_sha(read.text):
-                fields = hit["fields"]
+        emit("U1", "STARTED", "")
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="vf-store") as pool:
+            storing = pool.submit(store_document, self.repo, application_id, slot, pdf, self._next_version(docs, slot))
+            storing.add_done_callback(lambda f: emit("U1", "FAILED" if f.exception() else "COMPLETED", ""))
+            emit("U2", "STARTED", "")
+            kind = classify_document(read)
+            emit("U2", "COMPLETED", "")
+            if not read.readable and read.issue == OCR_UNAVAILABLE:
+                status = "unavailable"  # our side, not the vendor's file
+                emit("U3", "FAILED", "")
+            elif not read.readable:
+                status = "unreadable"
+                emit("U3", "SKIPPED", "")
             else:
-                try:
-                    fields = self._extract_one(slot, read)
-                except Exception:  # provider outage: sanitised, never the provider text
-                    entry["status"] = "unavailable"
-                    emit("U3", "FAILED", "")
-                    return entry, new_cache
-                new_cache[key] = {"text_sha": text_sha(read.text), "fields": fields}
-            entry["status"] = "read" if any(str(v or "").strip() for k, v in fields.items() if k != "address") \
-                else "nothing_found"
-            emit("U3", "COMPLETED" if entry["status"] == "read" else "FAILED", "")
+                target = kind if kind in SLOTS else slot  # read the file as what it is
+                status, added = self._read_for(target, sha, read, cache, emit)
+                new_cache.update(added)
+                if target != slot and status != "unavailable":
+                    status = "wrong_slot"
+            row = storing.result()  # a storage failure fails the upload, as before
+        if row["file_sha256"] != sha:  # defensive: key the reading by the stored bytes
+            new_cache = {k.split(":")[0] + ":" + row["file_sha256"]: v for k, v in new_cache.items()}
+        entry = {"document_id": str(row["id"]), "version": int(row["version"]), "filename": pdf.filename,
+                 "sha256": row["file_sha256"], "pages": read.pages, "kind": kind, "uploaded_at": _now(),
+                 "status": status}
         return entry, new_cache
 
+    def _read_for(self, slot: str, sha: str, read: ReadPDF, cache: dict,
+                  emit: Callable[[str, str, str], None]) -> tuple[str, dict]:
+        """Read `read` as a `slot` document, from the cache when the same file was read before."""
+        key = f"{slot}:{sha}"
+        emit("U3", "STARTED", "")
+        hit = cache.get(key)
+        if hit and hit.get("text_sha") == text_sha(read.text):
+            fields, added = hit["fields"], {}
+        else:
+            try:
+                fields = self._extract_one(slot, read)
+            except Exception:  # provider outage: sanitised, never the provider text
+                emit("U3", "FAILED", "")
+                return "unavailable", {}
+            added = {key: {"text_sha": text_sha(read.text), "fields": fields}}
+        status = _fields_status(fields)
+        emit("U3", "COMPLETED" if status == "read" else "FAILED", "")
+        return status, added
+
     def _place(self, application_id: str, placements: list[tuple[str, dict]], cache: dict,
-               clear: tuple[str, str] | None = None, kind: str = "draft") -> dict:
+               clear: tuple[str, str] | None = None, kind: str = "draft",
+               app: dict | None = None, ctx: tuple | None = None) -> dict:
         def change(draft: dict) -> None:
             draft.setdefault("cache", {}).update(cache)
             if clear and (draft["files"].get(clear[0]) or {}).get("document_id") == clear[1]:
                 draft["files"][clear[0]] = None  # moved to the empty slot
             for slot, entry in placements:
                 current = draft["files"].get(slot)
-                if current and current.get("document_id") != entry.get("document_id") \
+                # Versions of one slot only compare with that slot's: a moved file keeps the
+                # version of the row it was saved as, so it neither blocks nor is blocked.
+                if not entry.get("moved_from") and current and not current.get("moved_from") \
+                        and current.get("document_id") != entry.get("document_id") \
                         and int(current.get("version") or 0) > int(entry.get("version") or 0):
                     continue  # a newer upload to this slot already won
                 draft["files"][slot] = entry
@@ -580,23 +634,32 @@ class DraftService:
                 for field in FIELDS:
                     if DOC_OF[field] == slot:
                         draft["overrides"].pop(field, None)
-        return self._mutate(application_id, change, kind)
+        return self._mutate(application_id, change, kind, app=app, ctx=ctx)
 
     def add_file(self, application_id: str, slot: str, pdf: PDFInput,
-                 stage_callback: StageCallback | None = None, kind: str = "draft") -> dict:
+                 stage_callback: StageCallback | None = None, kind: str = "draft",
+                 app: dict | None = None, ctx: tuple | None = None) -> dict:
         if slot not in SLOTS:
             raise DraftInvalid("Unknown document slot.")
-        _app, draft, _guard = self._load(application_id, kind)
+        app_row, draft, _guard = self._load(application_id, kind, app, ctx)
         entry, cache = self._process(application_id, slot, pdf, read_document(pdf), draft.get("cache") or {},
                                      _emitter(stage_callback), int(draft.get("doc_base") or 0))
-        return self._place(application_id, [(slot, entry)], cache, kind=kind)
+        # The CAS write starts from the rows loaded above; a parallel upload makes it reload.
+        return self._place(application_id, [(slot, entry)], cache, kind=kind,
+                           app=app_row if kind == "draft" else None, ctx=ctx)
 
     def move_file(self, application_id: str, slot: str, stage_callback: StageCallback | None = None,
-                  kind: str = "draft") -> dict:
-        """Move the file in `slot` to the other slot; a file already there moves back (swap)."""
+                  kind: str = "draft", app: dict | None = None, ctx: tuple | None = None) -> dict:
+        """Move the file in `slot` to the other slot; a file already there moves back (swap).
+
+        The move itself is a label swap in the working copy, reusing the reading made at
+        upload (no re-upload, no provider call). Saved document rows are immutable
+        (database trigger) and writes are insert-only, so the evidence row for the new slot
+        is a NEW version: a server-side storage copy made right after the response
+        (`_copy_for_moves`), or at submit if that hasn't happened (`_evaluate`)."""
         if slot not in SLOTS:
             raise DraftInvalid("Unknown document slot.")
-        _app, draft, _guard = self._load(application_id, kind)
+        app_row, draft, _guard = self._load(application_id, kind, app, ctx)
         source = draft["files"].get(slot)
         if not source:
             raise DraftInvalid("There is no file to move.")
@@ -604,18 +667,85 @@ class DraftService:
         if draft["files"].get(OTHER[slot]):
             moves.append((draft["files"][OTHER[slot]], slot))
         cache = dict(draft.get("cache") or {})
-        placements, new_cache = [], {}
         emit = _emitter(stage_callback)
+        emit("U1", "STARTED", "")
+        emit("U1", "COMPLETED", "")
+        emit("U2", "STARTED", "")
+        emit("U2", "COMPLETED", "")
+        placements, new_cache = [], {}
         for entry, target in moves:
-            pdf = self.repo._download_verified(self._own_document(application_id, entry["document_id"]))
-            moved, added = self._process(application_id, target, pdf, read_document(pdf), cache, emit,
-                                         int(draft.get("doc_base") or 0))
-            placements.append((target, moved))
+            moved = {**entry, "uploaded_at": _now()}
+            moved.pop("on_file", None)  # not the version the last check used
+            # The row this file is saved as (its type is the slot it was uploaded to).
+            moved["moved_from"] = entry.get("moved_from") or str(entry["document_id"])
+            moved["status"], added = self._status_in(application_id, target, moved, cache, emit)
             new_cache.update(added)
+            placements.append((target, moved))
         clear = (slot, source["document_id"]) if len(moves) == 1 else None
-        return self._place(application_id, placements, new_cache, clear, kind=kind)
+        placed = self._place(application_id, placements, new_cache, clear, kind=kind,
+                             app=app_row if kind == "draft" else None, ctx=ctx)
+        pending = [(target, moved["document_id"]) for target, moved in placements]
+        _start_background(lambda: self._copy_for_moves(application_id, pending))
+        return placed
 
-    def remove_file(self, application_id: str, slot: str) -> dict:
+    def _copy_for_moves(self, application_id: str, pending: list[tuple[str, str]]) -> None:
+        """Best effort, after the response: the immutable evidence row for each moved file
+        in its new slot. Submit makes any copy that is missing, so a failure here is harmless."""
+        try:
+            docs = self.repo.application_documents(application_id)
+            self._copies_for(application_id, docs, pending)
+        except Exception:  # noqa: BLE001 - submit makes the copy instead
+            pass
+
+    def _copies_for(self, application_id: str, docs: list[dict], pending: list[tuple[str, str]]) -> dict[str, dict]:
+        """{source document id: row of the same bytes typed for its target slot}, copying
+        (in parallel) only those that don't exist yet. Never changes a saved row."""
+        by_id = {str(d["id"]): d for d in docs}
+        found, todo = {}, []
+        for target, source_id in pending:
+            source = by_id.get(str(source_id))
+            if source is None:
+                raise PersistenceError("Referenced document is not part of this application.")
+            if source["doc_type"] == target:
+                found[str(source_id)] = source
+                continue
+            same = [d for d in docs if d["doc_type"] == target and d["file_sha256"] == source["file_sha256"]
+                    and d["application_id"] == application_id]
+            if same:
+                found[str(source_id)] = max(same, key=lambda d: int(d["version"]))
+            else:
+                todo.append((target, source))
+        copies = parallel(*[
+            (lambda target=target, source=source: self.repo.copy_document(
+                application_id, source, target, self._next_version(docs, target)))
+            for target, source in todo])
+        for (_target, source), row in zip(todo, copies):
+            found[str(source["id"])] = row
+        return found
+
+    def _status_in(self, application_id: str, target: str, entry: dict, cache: dict,
+                   emit: Callable[[str, str, str], None]) -> tuple[str, dict]:
+        """Status of a moved file in `target`, from the reading made at upload when there is one."""
+        if entry.get("status") == "unreadable":
+            emit("U3", "SKIPPED", "")
+            return "unreadable", {}
+        if entry.get("kind") in SLOTS and entry["kind"] != target:
+            emit("U3", "SKIPPED", "")
+            return "wrong_slot", {}  # still not where it belongs
+        hit = cache.get(f"{target}:{entry['sha256']}")
+        if hit:
+            emit("U3", "STARTED", "")
+            status = _fields_status(hit["fields"])
+            emit("U3", "COMPLETED" if status == "read" else "FAILED", "")
+            return status, {}
+        # No earlier reading (e.g. the provider was down at upload): read it now.
+        read = read_document(self.repo._download_verified(self._own_document(application_id, entry["document_id"])))
+        if not read.readable:
+            emit("U3", "FAILED" if read.issue == OCR_UNAVAILABLE else "SKIPPED", "")
+            return ("unavailable" if read.issue == OCR_UNAVAILABLE else "unreadable"), {}
+        return self._read_for(target, entry["sha256"], read, cache, emit)
+
+    def remove_file(self, application_id: str, slot: str, app: dict | None = None) -> dict:
         if slot not in SLOTS:
             raise DraftInvalid("Unknown document slot.")
 
@@ -624,7 +754,7 @@ class DraftService:
             for field in FIELDS:
                 if DOC_OF[field] == slot:
                     draft["overrides"].pop(field, None)
-        return self._mutate(application_id, change)
+        return self._mutate(application_id, change, app=app)
 
     def _own_document(self, application_id: str, document_id: str) -> dict:
         row = self.repo._document_by_id(document_id)
@@ -634,7 +764,8 @@ class DraftService:
 
     # --- values
     def save_values(self, application_id: str, *, changes: dict | None = None, reset: list | None = None,
-                    contact: dict | None = None, declaration: bool | None = None, kind: str = "draft") -> dict:
+                    contact: dict | None = None, declaration: bool | None = None, kind: str = "draft",
+                    app: dict | None = None, ctx: tuple | None = None) -> dict:
         changes = {k: str(v or "").strip()[:200] for k, v in (changes or {}).items()}
         unknown = set(changes) - set(FIELDS) or set(reset or []) - set(FIELDS)
         if unknown:
@@ -658,7 +789,7 @@ class DraftService:
             if declaration is not None:
                 draft["declaration"] = bool(declaration)
                 draft["declared_at"] = _now() if declaration else ""
-        return self._mutate(application_id, change, kind)
+        return self._mutate(application_id, change, kind, app=app, ctx=ctx)
 
     def submission(self, draft: dict) -> V2Submission:
         values = current_values(draft)
@@ -674,45 +805,65 @@ class DraftService:
         )
 
     # --- submit
-    def submit(self, application_id: str, stage_callback: StageCallback | None = None) -> WorkflowResult:
-        app = self.repo._application(application_id)
+    def submit(self, application_id: str, stage_callback: StageCallback | None = None, *,
+               app: dict | None = None, declaration: bool = False, evidence: dict | None = None) -> WorkflowResult:
+        """`declaration=True` records the vendor's declaration with this submit (it is saved
+        in the run's payload), so no separate draft write is needed. `evidence` receives the
+        saved payload and document manifest, so the caller needn't read the run back."""
+        app = app if app is not None else self.repo._application(application_id)
         if app.get("latest_run_id"):  # lost response: return the saved result, never a second run
             saved = self.repo.saved_result(application_id)
             if saved is not None:
                 return saved
-        draft = self.draft(application_id)
+        draft = self.draft(application_id, app)
+        if declaration:
+            draft["declaration"] = True
+            draft["declared_at"] = str(draft.get("declared_at") or "") or _now()
         if not draft.get("declaration"):
             raise DraftInvalid("Confirm that these details are correct and belong to your business.")
         vendor = self.submission(draft)
         if not vendor.legal_name.strip() or not vendor.contact_email.strip():
             raise DraftInvalid("Add your legal business name and contact email before submitting.")
         return self._evaluate(application_id, draft, vendor, "submission", int(app.get("revision") or 0),
-                              stage_callback)
+                              stage_callback, evidence=evidence)
 
-    def submit_fix(self, application_id: str, stage_callback: StageCallback | None = None) -> tuple[WorkflowResult, int]:
+    def submit_fix(self, application_id: str, stage_callback: StageCallback | None = None, *,
+                   app: dict | None = None, ctx: tuple | None = None) -> tuple[WorkflowResult, int]:
         """Re-check after the vendor fixed the requested items. Reuses every reading
         already made (the latest run's and the fix uploads'). Returns (result, provider calls)."""
-        app, fix, _guard = self._load(application_id, "fix")
-        _app, run, review = self._fix_context(application_id)
+        ctx = ctx or self._fix_context(application_id, app)
+        app_row, fix, _guard = self._load(application_id, "fix", ctx=ctx)
+        _app, run, review = ctx
         blockers = fix_view(application_id, fix, v2.fix_items(run, review))["blockers"]
         if blockers:
             raise DraftInvalid(blockers[0])
         vendor = self.submission(fix)
-        return self._evaluate(application_id, fix, vendor, "resubmission", int(app.get("revision") or 0),
+        return self._evaluate(application_id, fix, vendor, "resubmission", int(app_row.get("revision") or 0),
                               stage_callback, count=True)
 
     def _evaluate(self, application_id: str, draft: dict, vendor: V2Submission, trigger: str,
-                  expected_revision: int, stage_callback: StageCallback | None, count: bool = False):
+                  expected_revision: int, stage_callback: StageCallback | None, count: bool = False,
+                  evidence: dict | None = None):
         uploads: dict[str, PDFInput | None] = {"GST": None, "BANK": None}
         manifest, cache = [], {}
-        for slot in SLOTS:
-            entry = draft["files"].get(slot)
-            if not entry:
-                continue
-            row = self._own_document(application_id, entry["document_id"])
+        entries = [(slot, draft["files"][slot]) for slot in SLOTS if draft["files"].get(slot)]
+        # The application's rows in one round trip; both files in parallel (no download for
+        # bytes this server already verified). A moved file resolves to its copy for the slot.
+        docs = self.repo.application_documents(application_id)
+        by_id = {str(d["id"]): d for d in docs}
+        moved = [(slot, str(e["document_id"])) for slot, e in entries
+                 if e.get("moved_from") and (by_id.get(str(e["document_id"])) or {}).get("doc_type") != slot]
+        copies = self._copies_for(application_id, docs, moved) if moved else {}
+        ordered = []
+        for slot, entry in entries:
+            row = by_id.get(str(entry["document_id"]))
+            if row is None:
+                raise PersistenceError("Referenced PDF version is no longer available.")
+            row = copies.get(str(row["id"]), row)
             if row["doc_type"] != slot or row["file_sha256"] != entry["sha256"]:
                 raise PersistenceError("Saved document does not match your application. Upload it again.")
-            pdf = self.repo._download_verified(row)
+            ordered.append(row)
+        for (slot, entry), row, pdf in zip(entries, ordered, self.repo.download_many(ordered)):
             uploads[slot] = pdf
             manifest.append(self.repo._manifest_entry(row))
             hit = (draft.get("cache") or {}).get(f"{slot}:{entry['sha256']}")
@@ -731,7 +882,18 @@ class DraftService:
             saved = self.repo.saved_result(application_id)
             if saved is None or saved.run_id != result.run_id:
                 raise
+        if evidence is not None:
+            evidence.update(payload=vendor.model_dump(), manifest=manifest)
         return (saved, extractor.provider_calls) if count else saved
+
+
+def _start_background(work: Callable[[], None]) -> None:
+    """Work that may finish after the response (tests replace this to run it inline)."""
+    threading.Thread(target=work, name="vf-after-move", daemon=True).start()
+
+
+def _fields_status(fields: dict) -> str:
+    return "read" if any(str(v or "").strip() for k, v in fields.items() if k != "address") else "nothing_found"
 
 
 def _emitter(callback: StageCallback | None) -> Callable[[str, str, str], None]:

@@ -24,9 +24,12 @@ interface AppState {
   apply: ApplyState;
   updateApply: (patch: Partial<ApplyState>) => void;
   resetApply: () => void;
-  handoff: Credentials | null;
-  setHandoff: (creds: Credentials | null) => void;
+  handoff: Handoff | null;
+  setHandoff: (creds: Handoff | null) => void;
 }
+
+/** Credentials handed to the track page in memory; `fixable` lets it open the fix page at once. */
+export type Handoff = Credentials & { fixable?: boolean };
 
 const FALLBACK_META: Meta = { states: [], max_pdf_bytes: 5 * 1024 * 1024, stages: [] };
 const emptyApply = (): ApplyState => ({ creds: null, step: 0, resume: false, receipt: null });
@@ -37,7 +40,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [meta, setMeta] = useState<Meta | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [apply, setApply] = useState<ApplyState>(emptyApply);
-  const [handoff, setHandoff] = useState<Credentials | null>(null);
+  const [handoff, setHandoff] = useState<Handoff | null>(null);
 
   useEffect(() => {
     Promise.all([api.health(), api.meta()])
