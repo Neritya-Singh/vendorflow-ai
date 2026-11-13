@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from backend import offline
 from vendorflow import v2_scan
 from vendorflow.gemini_extractor import GeminiExtractor
 from vendorflow.pdf_reader import PDFInput, UploadError
@@ -102,7 +103,10 @@ def test_clear_cheque_photo_is_read_once_grounded_by_ocr_and_approved(counted):
     page = client.get(base + "/pages/1")
     assert page.status_code == 200 and page.headers["content-type"] == "image/png"
     original = client.get(base)
-    assert original.headers["content-type"] == "image/jpeg" and original.content == load("photo_cheque", "cheque_photo.jpg")
+    # The stored evidence is the original photo minus its metadata (EXIF/GPS stripped, pixels unchanged).
+    assert original.headers["content-type"] == "image/jpeg"
+    assert original.content == v2_scan.strip_metadata("jpeg", load("photo_cheque", "cheque_photo.jpg"))
+    assert not Image.open(io.BytesIO(original.content)).getexif()
 
 
 def test_blurry_photo_waits_on_vendor_for_a_clearer_copy_then_retake_is_approved(counted):
@@ -136,6 +140,7 @@ def test_value_the_ocr_cannot_find_is_never_trusted(client):
     wrong = {**json.loads(image.info["comment"].decode().split(":", 1)[1]), "account_number": "004455667789"}
     buffer = io.BytesIO()
     image.save(buffer, "JPEG", quality=92, comment=("vendorflow-test-ground-truth:" + json.dumps(wrong)).encode())
+    offline.register_ground_truth(buffer.getvalue())  # the upload is stripped; the double finds it by pixels
     c = creds(client)
     send(client, c, "GST", load("photo_cheque", "gst_certificate.pdf"), "gst_certificate.pdf", "application/pdf")
     send(client, c, "BANK", buffer.getvalue(), "cheque.jpg", "image/jpeg")

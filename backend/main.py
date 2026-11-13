@@ -32,7 +32,7 @@ from vendorflow.persistence import (
 from vendorflow.pipeline import MinimumIntakeError
 from vendorflow.rules import GST_STATE_CODES, normalize_submission
 from vendorflow.ux_support import committed_pdf_types
-from vendorflow.v2_scan import content_type as doc_content_type, file_kind
+from vendorflow.v2_scan import content_type as doc_content_type, file_kind, strip_metadata
 from vendorflow.v2_intake import DraftInvalid, DraftLimit, DraftSubmitted, V2Submission, draft_view, fix_view
 
 from . import presenters
@@ -156,7 +156,8 @@ def create_app(settings: Settings | None = None, provider: ServiceProvider | Non
             if len(content) > MAX_PDF_BYTES:
                 raise HTTPException(413, f"{label}: the file exceeds 5 MB. Upload a smaller file.")
             try:
-                file_kind(name, content)
+                # Strip EXIF/GPS here so the reading, the hash and the stored original agree.
+                content = strip_metadata(file_kind(name, content), content)
             except UploadError as exc:
                 raise HTTPException(400, f"{label}: {exc}") from None
             return PDFInput(name, content)

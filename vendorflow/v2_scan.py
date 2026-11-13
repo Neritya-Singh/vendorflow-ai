@@ -70,6 +70,74 @@ def content_type(filename: str) -> str:
     return MIME_TYPES[EXTENSIONS[os.path.splitext(filename.casefold())[1]]]
 
 
+# ---------------------------------------------------------------- metadata
+
+_JPEG_KEEP_APP = {0xE0, 0xE2, 0xEE}       # JFIF, ICC profile, Adobe (colour transform)
+_PNG_KEEP = {b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA", b"cHRM", b"sRGB",
+             b"iCCP", b"sBIT", b"bKGD", b"pHYs"}
+
+
+def _orientation(content: bytes) -> int:
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            return int(image.getexif().get(0x0112, 1) or 1)
+    except Exception:
+        return 1
+
+
+def _strip_jpeg(content: bytes) -> bytes:
+    """Drop EXIF/XMP (APP1), IPTC (APP13), other APPn and comments; pixels untouched."""
+    out, i = bytearray(content[:2]), 2
+    while i + 4 <= len(content):
+        if content[i] != 0xFF:
+            raise UploadError("This image is damaged or can't be opened. Upload it again.")
+        marker = content[i + 1]
+        if marker == 0xFF:                      # fill byte
+            i += 1
+            continue
+        if marker == 0xDA:                      # start of scan: the rest is image data
+            out += content[i:]
+            return bytes(out)
+        length = int.from_bytes(content[i + 2:i + 4], "big")
+        segment = content[i:i + 2 + length]
+        if not ((0xE0 <= marker <= 0xEF and marker not in _JPEG_KEEP_APP) or marker == 0xFE):
+            out += segment
+        i += 2 + length
+    raise UploadError("This image is damaged or can't be opened. Upload it again.")
+
+
+def _strip_png(content: bytes) -> bytes:
+    """Keep only image/colour chunks: drops eXIf, tEXt/zTXt/iTXt, tIME and unknown chunks."""
+    out, i = bytearray(content[:8]), 8
+    while i + 12 <= len(content):
+        length = int.from_bytes(content[i:i + 4], "big")
+        kind = content[i + 4:i + 8]
+        if kind in _PNG_KEEP:
+            out += content[i:i + 12 + length]
+        i += 12 + length
+        if kind == b"IEND":
+            return bytes(out)
+    raise UploadError("This image is damaged or can't be opened. Upload it again.")
+
+
+def strip_metadata(kind: str, content: bytes) -> bytes:
+    """The photo we STORE as evidence carries no EXIF/GPS, camera data or comments.
+    Lossless (pixels unchanged) unless an EXIF rotation must be applied first; then the
+    upright pixels are re-encoded at high quality. PDFs are returned as they are.
+    Idempotent: a stripped file comes back byte-for-byte the same."""
+    if kind not in ("jpeg", "png"):
+        return content
+    if _orientation(content) != 1:
+        image = _open_image(content)            # upright; the strip below drops any metadata left
+        buffer = io.BytesIO()
+        if kind == "jpeg":
+            image.convert("RGB").save(buffer, "JPEG", quality=95, subsampling=0)
+        else:
+            image.save(buffer, "PNG")
+        content = buffer.getvalue()
+    return _strip_jpeg(content) if kind == "jpeg" else _strip_png(content)
+
+
 # ---------------------------------------------------------------- OCR
 
 def tesseract_available() -> bool:

@@ -13,11 +13,13 @@ Nothing here is ever used when Supabase credentials are configured.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import threading
 from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -265,8 +267,9 @@ class OfflineLabelExtractor:
     def extract_images(self, gst_images: list[bytes], bank_images: list[bytes],
                        gst_text: str = "", bank_text: str = "") -> ExtractedDocuments:
         """TEST DOUBLE for Gemini image input. It does not look at pixels: a synthetic
-        fixture photo carries its true values in a JPEG comment, which stands in for a
-        vision model that reads the photo correctly. Without that comment (e.g. a scanned
+        fixture photo carries its true values in a JPEG comment (looked up by pixels once
+        the upload's metadata is stripped), which stands in for a vision model that reads
+        the photo correctly. Without that comment (e.g. a scanned
         PDF page) it falls back to the labelled lines of the document's OCR text, which
         the caller passes as `*_text`. R13 grounding is always real Tesseract OCR."""
         out = self.extract(gst_text, bank_text)
@@ -279,7 +282,21 @@ class OfflineLabelExtractor:
         return out
 
 
-def _ground_truth(data: bytes) -> dict | None:
+_TRUTH_PREFIX = "vendorflow-test-ground-truth:"
+_TRUTH_BY_PIXELS: dict[str, dict] = {}
+_FIXTURES_INDEXED = False
+
+
+def _pixel_key(data: bytes) -> str | None:
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            return hashlib.sha256(f"{image.mode}{image.size}".encode() + image.tobytes()).hexdigest()
+    except Exception:  # noqa: BLE001 - not an image
+        return None
+
+
+def _comment_truth(data: bytes) -> dict | None:
     from PIL import Image
     try:
         comment = Image.open(io.BytesIO(data)).info.get("comment") or b""
@@ -287,10 +304,37 @@ def _ground_truth(data: bytes) -> dict | None:
         return None
     if isinstance(comment, bytes):
         comment = comment.decode("utf-8", "replace")
-    prefix = "vendorflow-test-ground-truth:"
-    if not comment.startswith(prefix):
+    if not comment.startswith(_TRUTH_PREFIX):
         return None
     try:
-        return json.loads(comment[len(prefix):])
+        return json.loads(comment[len(_TRUTH_PREFIX):])
     except ValueError:
         return None
+
+
+def register_ground_truth(data: bytes) -> None:
+    """TEST ONLY. Remember a synthetic photo's true values by its PIXELS: uploads are
+    stripped of all metadata (the JPEG comment too) before anything reads them, and
+    stripping is lossless, so the stripped upload has the same pixels."""
+    truth, key = _comment_truth(data), _pixel_key(data)
+    if truth and key:
+        _TRUTH_BY_PIXELS[key] = truth
+
+
+def _index_fixtures() -> None:
+    global _FIXTURES_INDEXED
+    if _FIXTURES_INDEXED:
+        return
+    _FIXTURES_INDEXED = True
+    root = Path(__file__).resolve().parents[1] / "fixtures"
+    for path in sorted(root.glob("*/*.jp*g")) + sorted(root.glob("*/*.png")):
+        register_ground_truth(path.read_bytes())
+
+
+def _ground_truth(data: bytes) -> dict | None:
+    truth = _comment_truth(data)
+    if truth:
+        return truth
+    _index_fixtures()
+    key = _pixel_key(data)
+    return _TRUTH_BY_PIXELS.get(key) if key else None

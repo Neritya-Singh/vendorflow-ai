@@ -30,7 +30,7 @@ from .persistence import (
     PersistenceError, SupabaseRepository, UnauthorizedTracking, _token_digest,
 )
 from .pipeline import ProcessingPipeline, StageCallback
-from .v2_scan import OCR_UNAVAILABLE, ReadDocument, content_type, file_kind, read_document
+from .v2_scan import OCR_UNAVAILABLE, ReadDocument, content_type, file_kind, read_document, strip_metadata
 from .rules import EMAIL_PATTERN, GST_STATE_CODES, GSTIN_PATTERN, IFSC_PATTERN, norm_id, norm_state
 
 SLOTS = ("GST", "BANK")
@@ -151,6 +151,7 @@ def store_document(repo: SupabaseRepository, application_id: str, slot: str, upl
     kind = file_kind(upload.filename, upload.content)
     if kind == "pdf":
         return repo.upload_document(application_id, slot, upload)
+    upload = PDFInput(upload.filename, strip_metadata(kind, upload.content))  # no EXIF/GPS in evidence
     old = repo._latest_document_row(application_id, slot)
     version = int(old["version"]) + 1 if old else 1
     sha = hashlib.sha256(upload.content).hexdigest()
